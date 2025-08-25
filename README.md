@@ -6,11 +6,12 @@ Prerequisites
 3) libpcap (usually preinstalled; on Ubuntu: sudo apt install libpcap-dev)
 4) pip
 
-git clone https://github.com/FancyWaifu/Malachi_stack.git
-cd Malachi_stack
-python3 -m venv .venv
-source .venv/bin/activate
-pip3 install scapy pynacl blake3
+Installing:
+1) git clone https://github.com/FancyWaifu/Malachi_stack.git
+2) cd Malachi_stack
+3) python3 -m venv .venv
+4) source .venv/bin/activate
+5) pip3 install scapy pynacl blake3
 
 Starting the interactive mode:
 1) Find your network interface
