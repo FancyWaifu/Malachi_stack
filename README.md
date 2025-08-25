@@ -4,7 +4,7 @@ Prerequisites
 1) Linux/macOS with Python 3.10+ (No idea if it works on windows)
 2) Root privileges (or CAP_NET_RAW) to send raw Ethernet frames
 3) libpcap (usually preinstalled; on Ubuntu: sudo apt install libpcap-dev)
-4) pip
+4) pip3
 
 Installing:
 1) git clone https://github.com/FancyWaifu/Malachi_stack.git
