@@ -1,5 +1,4 @@
-I'm writing my own network stack in Python for educational purposes and fun. Maybe could use this for real world application but I doubt it
-Still have a lot to work on with this project
+I'm writing my own network stack in Python for educational purposes and fun. Maybe could use this for real world application but I doubt it. Still have a lot to work on with this project
 
 Prerequisites
 1) Linux/macOS with Python 3.10+ (No idea if it works on windows)
