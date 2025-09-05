@@ -17,15 +17,25 @@ PT_L4_DGRAM  = 2             # L3 payload = our UDP-like L4 datagram
 PT_NDP       = 3             # Node Discovery Protocol (ARP-like)
 NDP_OP_DISCOVER  = 1         # broadcast "who's out there?"
 NDP_OP_ADVERTISE = 2         # unicast "I am (node_id, mac)"
+ED25519_PUB_LEN = 32
+X25519_PUB_LEN  = 32
+ED25519_SIG_LEN = 64
+NONCE_LEN       = 16
 ID_LEN       = 16            # NodeID length (bytes) = BLAKE3(pubkey)[:16]
 PAYLOAD_CAP  = 1400          # per-frame payload cap (safe single-frame size)
 KEYCTX       = b"layer3-nodeid-v1"
+ndp_recv_data = {} # Used to store ndp data recieved from other computers
+
+# Runtime key material (set in main())
+ED25519_SK = None                 # nacl.signing.SigningKey
+ED25519_PUB_BYTES = b""           # 32 bytes
+X25519_PUB_BYTES  = b""           # 32 bytes
 
 # Key locations (private files are mode 0600)
-KEYDIR        = os.path.join(os.path.expanduser("~"), ".ministack")
-ED25519_PATH  = os.path.join(KEYDIR, "ed25519.key")     # base64(32B Ed25519 secret)
-X25519_PRIV   = os.path.join(KEYDIR, "x25519.key")      # base64(32B X25519 secret)
-X25519_PUB    = os.path.join(KEYDIR, "x25519.pub")      # base64(32B X25519 public)
+KEYDIR            = os.path.join(os.path.expanduser("~"), ".ministack")
+ED25519_PATH      = os.path.join(KEYDIR, "ed25519.key")      # base64(32B Ed25519 secret)
+X25519_PRIV_PATH  = os.path.join(KEYDIR, "x25519.key")       # base64(32B X25519 secret)
+X25519_PUB_PATH   = os.path.join(KEYDIR, "x25519.pub")       # base64(32B X25519 public)
 
 # ---------------- Global state ----------------
 ports: dict[int, tuple[deque, Condition]] = {}  # port -> (queue, cond)
@@ -95,24 +105,19 @@ def load_or_create_ed25519() -> tuple["signing.SigningKey", "signing.VerifyKey"]
     return sk, sk.verify_key
 
 def derive_and_store_x25519(sk: "signing.SigningKey", vk: "signing.VerifyKey"):
-    """
-    Derive Curve25519 (X25519) from Ed25519 and persist.
-    Private is base64(32B), public is base64(32B).
-    Safe to call repeatedly; will (re)write pub and create priv if missing.
-    """
     _ensure_keydir()
     xsk = sk.to_curve25519_private_key()   # nacl.public.PrivateKey
     xpk = vk.to_curve25519_public_key()    # nacl.public.PublicKey
 
-    # Private: create if missing (don’t overwrite existing)
-    if not os.path.exists(X25519_PRIV):
-        with open(X25519_PRIV, "wb") as f:
+    # Private: create if missing
+    if not os.path.exists(X25519_PRIV_PATH):
+        with open(X25519_PRIV_PATH, "wb") as f:
             f.write(base64.b64encode(xsk.encode()))
             f.flush(); os.fsync(f.fileno())
-        _chmod600(X25519_PRIV)
+        _chmod600(X25519_PRIV_PATH)
 
     # Public: refresh each run (harmless if unchanged)
-    with open(X25519_PUB, "wb") as f:
+    with open(X25519_PUB_PATH, "wb") as f:
         f.write(base64.b64encode(xpk.encode()))
         f.flush(); os.fsync(f.fileno())
 
@@ -135,6 +140,10 @@ class ndp(Packet):
         ByteField("op", NDP_OP_DISCOVER),
         StrFixedLenField("node_id", b"\x00"*ID_LEN, ID_LEN),
         MACField("mac", "00:00:00:00:00:00"),
+        StrFixedLenField("ed25519_pub", b"\x00"*ED25519_PUB_LEN, ED25519_PUB_LEN),
+        StrFixedLenField("x25519_pub",  b"\x00"*X25519_PUB_LEN,  X25519_PUB_LEN),
+        StrFixedLenField("nonce",       b"\x00"*NONCE_LEN,       NONCE_LEN), 
+        StrFixedLenField("sig",         b"\x00"*ED25519_SIG_LEN, ED25519_SIG_LEN),
     ]
 
 class layer4(Packet):
@@ -150,7 +159,6 @@ bind_layers(layer3, layer4, ptype=PT_L4_DGRAM)
 
 # ---------------- Helpers ----------------
 def gen_node_id(pubkey_bytes: bytes, size: int = ID_LEN) -> bytes:
-    # Kept for reference; not used directly now.
     return blake3(KEYCTX + pubkey_bytes).digest()[:size]
 
 def node_id_from_pubkey(pubkey: bytes, size: int = ID_LEN) -> bytes:
@@ -191,6 +199,29 @@ def hex_to_id(s: str, size: int = ID_LEN) -> bytes:
 
 def alloc_ephemeral() -> int:
     return random.randint(49152, 65535)
+
+def _mac_bytes(mac_str: str) -> bytes:
+    # "aa:bb:cc:dd:ee:ff" -> b'\xaa\xbb\xcc\xdd\xee\xff'
+    return bytes.fromhex(mac_str.replace(":", ""))
+
+def _ndp_sig_bytes(op: int, node_id: bytes, mac_bytes: bytes,
+                   ed25519_pub: bytes, x25519_pub: bytes, nonce: bytes) -> bytes:
+    # Canonical transcript so both sides sign/verify exactly the same bytes.
+    return (b"MNDPv1|" +
+            bytes([op]) +
+            node_id +
+            mac_bytes +
+            ed25519_pub +
+            x25519_pub +
+            nonce)
+
+def _ndp_verify_bytes(op: int, node_id: bytes, mac_bytes: bytes, ed25519_pub: bytes, x25519_pub: bytes, nonce: bytes, sig: bytes) -> bool:
+    transcript = _ndp_sig_bytes(op, node_id, mac_bytes, ed25519_pub, x25519_pub, nonce)
+    try:
+        signing.VerifyKey(ed25519_pub).verify(transcript, sig)
+        return True
+    except Exception:
+        return False
 
 # ---------------- Per-port queues ----------------
 def bind_udp(port: int, capacity: int = 64):
@@ -236,6 +267,42 @@ def port_stats(port: int):
     dq, _ = ports[port]
     return {"depth": len(dq), "cap": dq.maxlen}
 
+def ndp_sanitation(op: int, node_id: bytes, mac: str, ed_pub: bytes, x2_pub: bytes, nonce: bytes, sig: bytes) -> bool:
+
+    # --- basic sanity ---
+    if not (isinstance(ed_pub, (bytes, bytearray)) and len(ed_pub) == ED25519_PUB_LEN):
+        log("[!!!] NDP invalid ed25519_pub length"); return False
+    if not (isinstance(x2_pub, (bytes, bytearray)) and len(x2_pub) == X25519_PUB_LEN):
+        log("[!!!] NDP invalid x25519_pub length"); return False
+    if not (isinstance(node_id, (bytes, bytearray)) and len(node_id) == ID_LEN):
+        log("[!!!] NDP invalid node_id length"); return False
+    if not (isinstance(nonce, (bytes, bytearray)) and len(nonce) == NONCE_LEN):
+        log("[!!!] NDP invalid nonce length"); return False
+    if not (isinstance(sig, (bytes, bytearray)) and len(sig) == ED25519_SIG_LEN):
+        log("[!!!] NDP invalid signature length"); return False
+
+    # --- NodeID must come from Ed25519 pubkey ---
+    if blake3(KEYCTX + ed_pub).digest()[:ID_LEN] != node_id:
+        log("[!!!] NDP node id validation failed! Invalid node ID!")
+        return False
+
+    # --- Signature verification (MAC must be raw 6B in transcript) ---
+    mac_bytes = _mac_bytes(mac)  # convert "aa:bb:..." -> b"\xaa\xbb..."
+    transcript = _ndp_sig_bytes(int(op), bytes(node_id), mac_bytes, bytes(ed_pub), bytes(x2_pub), bytes(nonce))
+    try:
+        signing.VerifyKey(bytes(ed_pub)).verify(transcript, bytes(sig))
+    except Exception as e:
+        log(f"[!!!] NDP packet is invalid! Bad signature: {e!r}")
+        return False
+
+    # --- accept & store ---
+    ndp_recv_data[bytes(node_id)] = [mac, bytes(ed_pub), bytes(x2_pub), bytes(nonce), bytes(sig)]
+    log(_block("NDP LEARN", [
+        f"peer  : {id_to_hex(bytes(node_id))}",
+        f"mac   : {mac}",
+    ]))
+    return True
+
 # ---------------- TX/RX: L3 & L4 & NDP ----------------
 def send_layer3(iface: str, my_id: bytes, dst_id: bytes, dst_mac: str, payload):
     if isinstance(payload, str):
@@ -265,10 +332,28 @@ def send_l4(iface: str, my_id: bytes, dst_id: bytes, dst_mac: str,
 
 def ndp_probe(iface: str, my_id: bytes):
     my_mac = get_if_hwaddr(iface)
-    frame = (Ether(dst="ff:ff:ff:ff:ff:ff", src=my_mac, type=ETH_TYPE) /
-             layer3(version=1, ptype=PT_NDP, dst_id=b"\x00"*ID_LEN, src_id=my_id) /
-             ndp(op=NDP_OP_DISCOVER, node_id=my_id, mac=my_mac))
+    mac_b  = _mac_bytes(my_mac)
+    nonce  = os.urandom(NONCE_LEN)
+    op     = NDP_OP_DISCOVER
+
+    # build and sign transcript
+    to_sign = _ndp_sig_bytes(op, my_id, mac_b, ED25519_PUB_BYTES, X25519_PUB_BYTES, nonce)
+    sig     = ED25519_SK.sign(to_sign).signature  # 64 bytes
+
+    frame = (
+        Ether(dst="ff:ff:ff:ff:ff:ff", src=my_mac, type=ETH_TYPE) /
+        layer3(version=1, ptype=PT_NDP, dst_id=b"\x00"*ID_LEN, src_id=my_id) /
+        ndp(op=op,
+            node_id=my_id,
+            mac=my_mac,
+            ed25519_pub=ED25519_PUB_BYTES,
+            x25519_pub=X25519_PUB_BYTES,
+            nonce=nonce,
+            sig=sig)
+    )
     sendp(frame, iface=iface, verbose=False)
+
+    # pretty log
     lines = [
         f"iface : {iface}",
         f"node  : {id_to_hex(my_id)}",
@@ -279,10 +364,26 @@ def ndp_probe(iface: str, my_id: bytes):
 
 def ndp_advertise(iface: str, my_id: bytes, requester_mac: str, requester_id: bytes):
     my_mac = get_if_hwaddr(iface)
-    frame = (Ether(dst=requester_mac, src=my_mac, type=ETH_TYPE) /
-             layer3(version=1, ptype=PT_NDP, dst_id=requester_id, src_id=my_id) /
-             ndp(op=NDP_OP_ADVERTISE, node_id=my_id, mac=my_mac))
+    mac_b  = _mac_bytes(my_mac)
+    nonce  = os.urandom(NONCE_LEN)
+    op     = NDP_OP_ADVERTISE
+
+    to_sign = _ndp_sig_bytes(op, my_id, mac_b, ED25519_PUB_BYTES, X25519_PUB_BYTES, nonce)
+    sig     = ED25519_SK.sign(to_sign).signature
+
+    frame = (
+        Ether(dst=requester_mac, src=my_mac, type=ETH_TYPE) /
+        layer3(version=1, ptype=PT_NDP, dst_id=requester_id, src_id=my_id) /
+        ndp(op=op,
+            node_id=my_id,
+            mac=my_mac,
+            ed25519_pub=ED25519_PUB_BYTES,
+            x25519_pub=X25519_PUB_BYTES,
+            nonce=nonce,
+            sig=sig)
+    )
     sendp(frame, iface=iface, verbose=False)
+
     lines = [
         f"iface : {iface}",
         f"to    : {requester_mac}",
@@ -322,11 +423,8 @@ def listen_loop(iface: str, my_id: bytes):
                     adv_mac = n.mac
                     if adv_id == my_id:
                         return
-                    lines = [
-                        f"peer  : {id_to_hex(adv_id)}",
-                        f"mac   : {adv_mac} (L2 src={src_mac})",
-                    ]
-                    log(_block("NDP LEARN", lines))
+
+                    ndp_sanitation(n.op, n.node_id, n.mac, n.ed25519_pub, n.x25519_pub, n.nonce, n.sig)
                 return
 
             # L4
@@ -599,8 +697,8 @@ def handle_command(line: str, iface: str, my_id: bytes):
                 raw = base64.b64decode(open(ED25519_PATH, "rb").read())
                 vk = signing.SigningKey(raw).verify_key
                 ed_b64 = base64.b64encode(bytes(vk)).decode("ascii")
-            if os.path.exists(X25519_PUB):
-                xpub_b64 = open(X25519_PUB, "rb").read().decode("ascii")
+            if os.path.exists(X25519_PUB_PATH):
+                xpub_b64 = open(X25519_PUB_PATH, "rb").read().decode("ascii")
         except Exception as e:
             log(f"[KEYS] error: {e!r}")
             return
@@ -611,8 +709,8 @@ def handle_command(line: str, iface: str, my_id: bytes):
             f"X25519 pub  : {xpub_b64}",
             f"files:",
             f"  {ED25519_PATH} (private)",
-            f"  {X25519_PRIV} (private)",
-            f"  {X25519_PUB}  (public)",
+            f"  {X25519_PRIV_PATH} (private)",
+            f"  {X25519_PUB_PATH}  (public)",
         ]
         log("\n".join(lines))
         return
@@ -646,6 +744,12 @@ def main():
     # Create/refresh X25519 keys (for encryption/key agreement)
     xsk, xpk = derive_and_store_x25519(sk, vk)
 
+    # ---- expose runtime key material for NDP signing / adverts ----
+    global ED25519_SK, ED25519_PUB_BYTES, X25519_PUB_BYTES
+    ED25519_SK         = sk
+    ED25519_PUB_BYTES  = bytes(vk)        # 32B
+    X25519_PUB_BYTES   = bytes(xpk)       # 32B
+
     # Nice one-time log on startup
     try:
         ed_pub_b64 = base64.b64encode(bytes(vk)).decode("ascii")
@@ -656,8 +760,8 @@ def main():
             f"  X25519 pub  : {x_pub_b64}\n"
             f"  files       :\n"
             f"    {ED25519_PATH} (private, 0600)\n"
-            f"    {X25519_PRIV} (private, 0600)\n"
-            f"    {X25519_PUB}  (public)")
+            f"    {X25519_PRIV_PATH} (private, 0600)\n"
+            f"    {X25519_PUB_PATH}  (public)")
     except Exception:
         pass
 
