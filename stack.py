@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import sys, argparse, random, shlex, time, threading, os, base64, pathlib
+import sys, argparse, random, shlex, time, threading, os, base64, pathlib, json
 from queue import Queue, Empty
-from collections import deque
-from threading import Condition
+from collections import deque, OrderedDict, defaultdict
+from threading import Condition, RLock
 
 import curses
 from blake3 import blake3
@@ -24,18 +24,32 @@ NONCE_LEN       = 16
 ID_LEN       = 16            # NodeID length (bytes) = BLAKE3(pubkey)[:16]
 PAYLOAD_CAP  = 1400          # per-frame payload cap (safe single-frame size)
 KEYCTX       = b"layer3-nodeid-v1"
-ndp_recv_data = {} # Used to store ndp data recieved from other computers
+ndp_recv_data = {} # legacy view; neighbor info also tracked in neighbors table below
 
-# Runtime key material (set in main())
-ED25519_SK = None                 # nacl.signing.SigningKey
-ED25519_PUB_BYTES = b""           # 32 bytes
-X25519_PUB_BYTES  = b""           # 32 bytes
+# --- Neighbor table / replay / rate-limit parameters ---
+MAX_NEIGHBORS       = 1024       # cap neighbor entries (LRU eviction)
+NEIGHBOR_TTL        = 30 * 60    # seconds; drop if not refreshed (30 min)
+NONCE_CACHE_SIZE    = 128        # recent nonces kept per peer
+
+# Per-MAC + global NDP rate limits (token buckets)
+NDP_RL_RATE         = 5.0        # tokens per second (per requester MAC)
+NDP_RL_BURST        = 10.0       # burst size
+NDP_GLOBAL_RATE     = 50.0       # tokens per second (global)
+NDP_GLOBAL_BURST    = 200.0      # burst size (global)
+
+# NDPv2 (secure) parameters
+NDP_PROTO_VER = 2
+CHALLENGE_LEN = 16
+PSK_TAG_LEN   = 16
+CHALLENGE_TTL = 180.0
+MAX_OUTSTANDING_CH = 256
 
 # Key locations (private files are mode 0600)
 KEYDIR            = os.path.join(os.path.expanduser("~"), ".ministack")
 ED25519_PATH      = os.path.join(KEYDIR, "ed25519.key")      # base64(32B Ed25519 secret)
 X25519_PRIV_PATH  = os.path.join(KEYDIR, "x25519.key")       # base64(32B X25519 secret)
 X25519_PUB_PATH   = os.path.join(KEYDIR, "x25519.pub")       # base64(32B X25519 public)
+PINS_PATH         = os.path.join(KEYDIR, "peers.json")       # TOFU pins: node_id_hex -> b64(ed25519_pub)
 
 # ---------------- Global state ----------------
 ports: dict[int, tuple[deque, Condition]] = {}  # port -> (queue, cond)
@@ -44,6 +58,27 @@ stop_flag = threading.Event()
 
 # viewer threads: port -> (thread, stop_event)
 _viewers: dict[int, tuple[threading.Thread, threading.Event]] = {}
+
+# Runtime key material (set in main())
+ED25519_SK = None                 # nacl.signing.SigningKey
+ED25519_PUB_BYTES = b""           # 32 bytes
+X25519_PUB_BYTES  = b""           # 32 bytes
+PSK_BYTES: bytes | None = None    # Optional PSK for NDPv2; set from --psk-file
+
+# --- Secure neighbor & replay state ---
+_state_lock = RLock()
+# neighbors: Ordered LRU -> node_id(bytes) : {mac(str), ed(bytes), x2(bytes), last_seen(float), nonces_deque(deque), nonces_set(set)}
+neighbors: "OrderedDict[bytes, dict]" = OrderedDict()
+
+# Rate-limiters (NDP)
+_ndp_rl_permac: dict[str, tuple[float, float]] = {}    # mac -> (tokens, last_ts)
+_ndp_rl_global: tuple[float, float] = (NDP_GLOBAL_BURST, time.time())
+
+# Outstanding requester challenges we have issued: challenge(bytes) -> expiry_ts
+_out_challenges: dict[bytes, float] = {}
+
+# TOFU pins: node_id_hex -> base64(ed25519_pub)
+_pins: dict[str, str] = {}
 
 # ---- TUI-safe text helpers ----
 def _safe_payload_preview(b: bytes, max_len: int = 512) -> str:
@@ -72,6 +107,7 @@ def _short_id(b: bytes) -> str:
     h = id_to_hex(b)
     return h[:11] + "…" + h[-11:]
 
+# ---- Filesystem helpers ----
 def _ensure_keydir():
     pathlib.Path(KEYDIR).mkdir(parents=True, exist_ok=True)
 
@@ -81,6 +117,7 @@ def _chmod600(path: str):
     except Exception:
         pass  # best effort on non-POSIX FS
 
+# ---------------- Key loading ----------------
 def load_or_create_ed25519() -> tuple["signing.SigningKey", "signing.VerifyKey"]:
     """
     Load persistent Ed25519. If missing, create and store base64(32B secret).
@@ -134,28 +171,25 @@ class layer3(Packet):
         StrFixedLenField("src_id",  b"\x00"*ID_LEN, ID_LEN),
     ]
 
-class ndp(Packet):
-    name = "NDP"
+class ndp2(Packet):
+    name = "NDP2"
     fields_desc = [
         ByteField("op", NDP_OP_DISCOVER),
-        StrFixedLenField("node_id", b"\x00"*ID_LEN, ID_LEN),
+        ByteField("ver", NDP_PROTO_VER),
+        StrFixedLenField("self_id", b"\x00"*ID_LEN, ID_LEN),
         MACField("mac", "00:00:00:00:00:00"),
         StrFixedLenField("ed25519_pub", b"\x00"*ED25519_PUB_LEN, ED25519_PUB_LEN),
         StrFixedLenField("x25519_pub",  b"\x00"*X25519_PUB_LEN,  X25519_PUB_LEN),
-        StrFixedLenField("nonce",       b"\x00"*NONCE_LEN,       NONCE_LEN), 
+        StrFixedLenField("peer_id",     b"\x00"*ID_LEN, ID_LEN),
+        StrFixedLenField("challenge",   b"\x00"*CHALLENGE_LEN, CHALLENGE_LEN),
+        StrFixedLenField("nonce",       b"\x00"*NONCE_LEN, NONCE_LEN),
+        StrFixedLenField("psk_tag",     b"\x00"*PSK_TAG_LEN, PSK_TAG_LEN),
         StrFixedLenField("sig",         b"\x00"*ED25519_SIG_LEN, ED25519_SIG_LEN),
     ]
 
-class layer4(Packet):
-    name = "Layer4"
-    fields_desc = [
-        ShortField("src_port", 0),
-        ShortField("dst_port", 0),
-    ]
-
 bind_layers(Ether, layer3, type=ETH_TYPE)
-bind_layers(layer3, ndp, ptype=PT_NDP)
-bind_layers(layer3, layer4, ptype=PT_L4_DGRAM)
+bind_layers(layer3, ndp2, ptype=PT_NDP)
+bind_layers(layer3, layer4:=Packet, ptype=PT_L4_DGRAM)  # placeholder; actual layer4 defined below
 
 # ---------------- Helpers ----------------
 def gen_node_id(pubkey_bytes: bytes, size: int = ID_LEN) -> bytes:
@@ -204,26 +238,174 @@ def _mac_bytes(mac_str: str) -> bytes:
     # "aa:bb:cc:dd:ee:ff" -> b'\xaa\xbb\xcc\xdd\xee\xff'
     return bytes.fromhex(mac_str.replace(":", ""))
 
-def _ndp_sig_bytes(op: int, node_id: bytes, mac_bytes: bytes,
-                   ed25519_pub: bytes, x25519_pub: bytes, nonce: bytes) -> bytes:
-    # Canonical transcript so both sides sign/verify exactly the same bytes.
-    return (b"MNDPv1|" +
-            bytes([op]) +
-            node_id +
-            mac_bytes +
-            ed25519_pub +
-            x25519_pub +
-            nonce)
+# ---------------- NDPv2 helpers ----------------
 
-def _ndp_verify_bytes(op: int, node_id: bytes, mac_bytes: bytes, ed25519_pub: bytes, x25519_pub: bytes, nonce: bytes, sig: bytes) -> bool:
-    transcript = _ndp_sig_bytes(op, node_id, mac_bytes, ed25519_pub, x25519_pub, nonce)
+def _load_psk(path: str | None) -> bytes | None:
+    if not path:
+        return None
     try:
-        signing.VerifyKey(ed25519_pub).verify(transcript, sig)
-        return True
+        data = open(path, "rb").read().strip()
+        try:
+            return base64.b64decode(data, validate=True)
+        except Exception:
+            return data
     except Exception:
+        return None
+
+# Pins (TOFU)
+
+def _load_pins() -> dict:
+    try:
+        with open(PINS_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_pins(pins: dict):
+    os.makedirs(KEYDIR, exist_ok=True)
+    tmp = PINS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(pins, f, indent=2, sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, PINS_PATH)
+
+_pins = _load_pins()
+
+# Token bucket utils
+
+def _tb_take(bucket: tuple[float, float], rate: float, burst: float) -> tuple[tuple[float, float], bool]:
+    tokens, last = bucket
+    now = time.time()
+    tokens = min(burst, tokens + (now - last) * rate)
+    if tokens >= 1.0:
+        return (tokens - 1.0, now), True
+    return (tokens, now), False
+
+def _rl_allow(mac: str) -> bool:
+    mac = mac.lower()
+    with _state_lock:
+        # global
+        global _ndp_rl_global
+        _ndp_rl_global, ok_g = _tb_take(_ndp_rl_global, NDP_GLOBAL_RATE, NDP_GLOBAL_BURST)
+        # per-MAC
+        bucket = _ndp_rl_permac.get(mac, (NDP_RL_BURST, time.time()))
+        newb, ok_m = _tb_take(bucket, NDP_RL_RATE, NDP_RL_BURST)
+        _ndp_rl_permac[mac] = newb
+        return ok_g and ok_m
+
+# Challenges
+
+def _add_challenge(ch: bytes):
+    with _state_lock:
+        if len(_out_challenges) >= MAX_OUTSTANDING_CH:
+            # evict oldest
+            oldest = sorted(_out_challenges.items(), key=lambda kv: kv[1])[0][0]
+            _out_challenges.pop(oldest, None)
+        _out_challenges[ch] = time.time() + CHALLENGE_TTL
+
+def _consume_challenge(ch: bytes) -> bool:
+    with _state_lock:
+        exp = _out_challenges.pop(ch, None)
+        return exp is not None and exp >= time.time()
+
+def _prune_challenges():
+    now = time.time()
+    with _state_lock:
+        dead = [c for c, exp in _out_challenges.items() if exp < now]
+        for c in dead:
+            _out_challenges.pop(c, None)
+
+# Neighbor / replay
+
+def _neighbors_prune(now: float | None = None):
+    if now is None:
+        now = time.time()
+    with _state_lock:
+        stale = [nid for nid, ent in neighbors.items() if now - ent["last_seen"] > NEIGHBOR_TTL]
+        for nid in stale:
+            neighbors.pop(nid, None)
+
+def _get_or_create_neighbor(node_id: bytes, mac: str, ed_pub: bytes, x2_pub: bytes) -> dict:
+    with _state_lock:
+        ent = neighbors.get(node_id)
+        if ent is None:
+            ent = {
+                "mac": mac,
+                "ed": ed_pub,
+                "x2": x2_pub,
+                "last_seen": time.time(),
+                "nonces_deque": deque(maxlen=NONCE_CACHE_SIZE),
+                "nonces_set": set(),
+            }
+            neighbors[node_id] = ent
+            while len(neighbors) > MAX_NEIGHBORS:
+                neighbors.popitem(last=False)
+        else:
+            ent["mac"] = mac
+            ent["ed"]  = ed_pub
+            ent["x2"]  = x2_pub
+            ent["last_seen"] = time.time()
+            neighbors.move_to_end(node_id)
+        return ent
+
+def _nonce_seen(node_id: bytes, nonce: bytes) -> bool:
+    with _state_lock:
+        ent = neighbors.get(node_id)
+        if ent is None:
+            ent = _get_or_create_neighbor(node_id, mac="??:??:??:??:??:??", ed_pub=b"", x2_pub=b"")
+        dq = ent["nonces_deque"]
+        st = ent["nonces_set"]
+        if nonce in st:
+            return True
+        if len(dq) == dq.maxlen and dq:
+            dropped = dq.popleft(); st.discard(dropped)
+        dq.append(nonce); st.add(nonce)
+        ent["last_seen"] = time.time()
         return False
 
+def _store_neighbor(node_id: bytes, mac: str, ed_pub: bytes, x2_pub: bytes, nonce: bytes, sig: bytes):
+    ent = _get_or_create_neighbor(node_id, mac, ed_pub, x2_pub)
+    ent["last_seen"] = time.time()
+    ndp_recv_data[node_id] = [mac, ed_pub, x2_pub, nonce, sig]
+
+# Canonical transcript (NDPv2)
+
+def _ndp2_sig_bytes(op: int, role: int, self_id: bytes, mac_bytes: bytes,
+                    peer_id: bytes, challenge: bytes,
+                    ed25519_pub: bytes, x25519_pub: bytes, nonce: bytes, psk_tag: bytes) -> bytes:
+    # role: 0x01 DISCOVER, 0x02 ADVERTISE
+    return (b"MNDPv2|" + bytes([op]) + bytes([role]) + self_id + mac_bytes +
+            peer_id + challenge + ed25519_pub + x25519_pub + nonce + psk_tag)
+
+def _psk_tag(self_id: bytes, peer_id: bytes, challenge: bytes) -> bytes:
+    if PSK_BYTES is None:
+        return b"\x00" * PSK_TAG_LEN
+    # Derive a short tag; included in signature transcript
+    return blake3(PSK_BYTES + self_id + peer_id + challenge).digest()[:PSK_TAG_LEN]
+
+# Pinning (TOFU)
+
+def _pin_check_or_set(node_id: bytes, ed_pub: bytes) -> bool:
+    nid_hex = id_to_hex(node_id)
+    b64 = base64.b64encode(ed_pub).decode("ascii")
+    with _state_lock:
+        cur = _pins.get(nid_hex)
+        if cur is None:
+            _pins[nid_hex] = b64
+            try:
+                _save_pins(_pins)
+            except Exception:
+                pass
+            log(f"[TOFU] pinned {nid_hex}")
+            return True
+        if cur != b64:
+            log(f"[!!!] TOFU pin mismatch for {nid_hex} — rejecting")
+            return False
+        return True
+
 # ---------------- Per-port queues ----------------
+# (unchanged)
+
 def bind_udp(port: int, capacity: int = 64):
     if port in ports:
         raise ValueError("port already bound")
@@ -267,43 +449,82 @@ def port_stats(port: int):
     dq, _ = ports[port]
     return {"depth": len(dq), "cap": dq.maxlen}
 
-def ndp_sanitation(op: int, node_id: bytes, mac: str, ed_pub: bytes, x2_pub: bytes, nonce: bytes, sig: bytes) -> bool:
+# ---------------- NDPv2 validation ----------------
+from nacl import signing as _sign_mod
 
-    # --- basic sanity ---
-    if not (isinstance(ed_pub, (bytes, bytearray)) and len(ed_pub) == ED25519_PUB_LEN):
-        log("[!!!] NDP invalid ed25519_pub length"); return False
-    if not (isinstance(x2_pub, (bytes, bytearray)) and len(x2_pub) == X25519_PUB_LEN):
-        log("[!!!] NDP invalid x25519_pub length"); return False
-    if not (isinstance(node_id, (bytes, bytearray)) and len(node_id) == ID_LEN):
-        log("[!!!] NDP invalid node_id length"); return False
-    if not (isinstance(nonce, (bytes, bytearray)) and len(nonce) == NONCE_LEN):
-        log("[!!!] NDP invalid nonce length"); return False
-    if not (isinstance(sig, (bytes, bytearray)) and len(sig) == ED25519_SIG_LEN):
-        log("[!!!] NDP invalid signature length"); return False
-
-    # --- NodeID must come from Ed25519 pubkey ---
-    if blake3(KEYCTX + ed_pub).digest()[:ID_LEN] != node_id:
-        log("[!!!] NDP node id validation failed! Invalid node ID!")
-        return False
-
-    # --- Signature verification (MAC must be raw 6B in transcript) ---
-    mac_bytes = _mac_bytes(mac)  # convert "aa:bb:..." -> b"\xaa\xbb..."
-    transcript = _ndp_sig_bytes(int(op), bytes(node_id), mac_bytes, bytes(ed_pub), bytes(x2_pub), bytes(nonce))
+def ndp2_validate(n: "ndp2", l3: "layer3", l2_src_mac: str, my_id: bytes, role_expected: int) -> tuple[bool, str]:
     try:
-        signing.VerifyKey(bytes(ed_pub)).verify(transcript, bytes(sig))
-    except Exception as e:
-        log(f"[!!!] NDP packet is invalid! Bad signature: {e!r}")
-        return False
+        # sizes & version
+        if n.ver != NDP_PROTO_VER:
+            return False, "bad ver"
+        for fld, want in [("self_id", ID_LEN), ("ed25519_pub", ED25519_PUB_LEN),
+                          ("x25519_pub", X25519_PUB_LEN), ("peer_id", ID_LEN),
+                          ("challenge", CHALLENGE_LEN), ("nonce", NONCE_LEN),
+                          ("psk_tag", PSK_TAG_LEN), ("sig", ED25519_SIG_LEN)]:
+            if len(bytes(getattr(n, fld))) != want:
+                return False, f"bad {fld} len"
 
-    # --- accept & store ---
-    ndp_recv_data[bytes(node_id)] = [mac, bytes(ed_pub), bytes(x2_pub), bytes(nonce), bytes(sig)]
-    log(_block("NDP LEARN", [
-        f"peer  : {id_to_hex(bytes(node_id))}",
-        f"mac   : {mac}",
-    ]))
-    return True
+        self_id   = bytes(n.self_id)
+        mac_str   = n.mac
+        mac_bytes = _mac_bytes(mac_str)
+        peer_id   = bytes(n.peer_id)
+        challenge = bytes(n.challenge)
+        ed_pub    = bytes(n.ed25519_pub)
+        x_pub     = bytes(n.x25519_pub)
+        nonce     = bytes(n.nonce)
+        tag       = bytes(n.psk_tag)
+        sig       = bytes(n.sig)
+        op        = int(n.op)
+
+        # identity & headers
+        if gen_node_id(ed_pub) != self_id:
+            return False, "node_id mismatch"
+        if mac_str.lower() != l2_src_mac.lower():
+            return False, "L2 MAC mismatch"
+        if bytes(l3.src_id) != self_id:
+            return False, "L3 src_id mismatch"
+
+        # PSK (optional)
+        if PSK_BYTES is not None and tag != _psk_tag(self_id, peer_id, challenge):
+            return False, "PSK tag invalid"
+
+        # signature over canonical transcript
+        transcript = _ndp2_sig_bytes(op, role_expected, self_id, mac_bytes, peer_id, challenge, ed_pub, x_pub, nonce, tag)
+        _sign_mod.VerifyKey(ed_pub).verify(transcript, sig)
+
+        # replay
+        if _nonce_seen(self_id, nonce):
+            return False, "replayed nonce"
+
+        # role-specific checks
+        if role_expected == 0x02:  # ADVERTISE we receive
+            if peer_id != my_id:
+                return False, "peer_id != my_id"
+            if not _consume_challenge(challenge):
+                return False, "unknown/expired challenge"
+
+        # TOFU pinning (after signature succeeds)
+        if not _pin_check_or_set(self_id, ed_pub):
+            return False, "pin mismatch"
+
+        # store neighbor
+        _store_neighbor(self_id, mac_str, ed_pub, x_pub, nonce, sig)
+        _neighbors_prune(); _prune_challenges()
+        return True, "ok"
+    except Exception as e:
+        return False, f"verify error: {e!r}"
 
 # ---------------- TX/RX: L3 & L4 & NDP ----------------
+class layer4(Packet):
+    name = "Layer4"
+    fields_desc = [
+        ShortField("src_port", 0),
+        ShortField("dst_port", 0),
+    ]
+
+# Rebind now that layer4 is defined
+bind_layers(layer3, layer4, ptype=PT_L4_DGRAM)
+
 def send_layer3(iface: str, my_id: bytes, dst_id: bytes, dst_mac: str, payload):
     if isinstance(payload, str):
         payload = payload.encode()
@@ -331,56 +552,64 @@ def send_l4(iface: str, my_id: bytes, dst_id: bytes, dst_mac: str,
     log(f"[SEND L4] {iface} -> {dst_mac}  {src_port}->{dst_port}  dst_id={id_to_hex(dst_id)}  bytes={len(payload)}")
 
 def ndp_probe(iface: str, my_id: bytes):
+    # Rate-limit globally/per-mac
     my_mac = get_if_hwaddr(iface)
+    if not _rl_allow(my_mac):
+        log("[NDP RL] budget exceeded for DISCOVER")
+        return
     mac_b  = _mac_bytes(my_mac)
+    challenge = os.urandom(CHALLENGE_LEN)
     nonce  = os.urandom(NONCE_LEN)
     op     = NDP_OP_DISCOVER
+    role   = 0x01
+    peer_id = b"\x00"*ID_LEN
+    tag    = _psk_tag(my_id, peer_id, challenge)
 
-    # build and sign transcript
-    to_sign = _ndp_sig_bytes(op, my_id, mac_b, ED25519_PUB_BYTES, X25519_PUB_BYTES, nonce)
-    sig     = ED25519_SK.sign(to_sign).signature  # 64 bytes
+    to_sign = _ndp2_sig_bytes(op, role, my_id, mac_b, peer_id, challenge, ED25519_PUB_BYTES, X25519_PUB_BYTES, nonce, tag)
+    sig     = ED25519_SK.sign(to_sign).signature
 
     frame = (
         Ether(dst="ff:ff:ff:ff:ff:ff", src=my_mac, type=ETH_TYPE) /
         layer3(version=1, ptype=PT_NDP, dst_id=b"\x00"*ID_LEN, src_id=my_id) /
-        ndp(op=op,
-            node_id=my_id,
-            mac=my_mac,
-            ed25519_pub=ED25519_PUB_BYTES,
-            x25519_pub=X25519_PUB_BYTES,
-            nonce=nonce,
-            sig=sig)
+        ndp2(op=op, ver=NDP_PROTO_VER,
+             self_id=my_id, mac=my_mac,
+             ed25519_pub=ED25519_PUB_BYTES, x25519_pub=X25519_PUB_BYTES,
+             peer_id=peer_id, challenge=challenge, nonce=nonce, psk_tag=tag, sig=sig)
     )
     sendp(frame, iface=iface, verbose=False)
+    _add_challenge(challenge)
 
-    # pretty log
     lines = [
         f"iface : {iface}",
         f"node  : {id_to_hex(my_id)}",
         f"mac   : {my_mac}",
         "dst   : ff:ff:ff:ff:ff:ff (broadcast)",
     ]
-    log(_block("NDP PROBE", lines))
+    log(_block("NDPv2 PROBE", lines))
 
-def ndp_advertise(iface: str, my_id: bytes, requester_mac: str, requester_id: bytes):
+def ndp_advertise(iface: str, my_id: bytes, requester_mac: str, requester_id: bytes, challenge: bytes):
+    if not _rl_allow(requester_mac):
+        log(f"[NDP RL] rate-limited ADVERTISE to {requester_mac}")
+        return
+
     my_mac = get_if_hwaddr(iface)
     mac_b  = _mac_bytes(my_mac)
     nonce  = os.urandom(NONCE_LEN)
     op     = NDP_OP_ADVERTISE
+    role   = 0x02
+    peer_id = requester_id
+    tag    = _psk_tag(my_id, peer_id, challenge)
 
-    to_sign = _ndp_sig_bytes(op, my_id, mac_b, ED25519_PUB_BYTES, X25519_PUB_BYTES, nonce)
+    to_sign = _ndp2_sig_bytes(op, role, my_id, mac_b, peer_id, challenge, ED25519_PUB_BYTES, X25519_PUB_BYTES, nonce, tag)
     sig     = ED25519_SK.sign(to_sign).signature
 
     frame = (
         Ether(dst=requester_mac, src=my_mac, type=ETH_TYPE) /
         layer3(version=1, ptype=PT_NDP, dst_id=requester_id, src_id=my_id) /
-        ndp(op=op,
-            node_id=my_id,
-            mac=my_mac,
-            ed25519_pub=ED25519_PUB_BYTES,
-            x25519_pub=X25519_PUB_BYTES,
-            nonce=nonce,
-            sig=sig)
+        ndp2(op=op, ver=NDP_PROTO_VER,
+             self_id=my_id, mac=my_mac,
+             ed25519_pub=ED25519_PUB_BYTES, x25519_pub=X25519_PUB_BYTES,
+             peer_id=peer_id, challenge=challenge, nonce=nonce, psk_tag=tag, sig=sig)
     )
     sendp(frame, iface=iface, verbose=False)
 
@@ -390,8 +619,9 @@ def ndp_advertise(iface: str, my_id: bytes, requester_mac: str, requester_id: by
         f"node  : {id_to_hex(my_id)}",
         f"mac   : {my_mac}",
     ]
-    log(_block("NDP ADVERTISE", lines))
+    log(_block("NDPv2 ADVERTISE", lines))
 
+# ---------------- Listener ----------------
 def listen_loop(iface: str, my_id: bytes):
     """Background sniffer thread: handles NDP + L4, publishes to queues, logs events."""
     bpf = f"ether proto 0x{ETH_TYPE:04x}"
@@ -406,25 +636,32 @@ def listen_loop(iface: str, my_id: bytes):
             if l3.magic != b"MN" or l3.version != 1:
                 return
 
-            # NDP
-            if l3.ptype == PT_NDP and pkt.haslayer(ndp):
-                n = pkt[ndp]
+            # NDPv2
+            if l3.ptype == PT_NDP and pkt.haslayer(ndp2):
+                n = pkt[ndp2]
                 src_mac = pkt.src.lower()
                 if n.op == NDP_OP_DISCOVER:
                     if src_mac == local_mac:
                         return  # ignore self DISCOVER
-                    ndp_advertise(iface, my_id, requester_mac=src_mac, requester_id=bytes(l3.src_id))
+                    ok, why = ndp2_validate(n, l3, pkt.src, my_id, role_expected=0x01)
+                    if not ok:
+                        log(f"[NDPv2 DISCOVER drop] {why}")
+                        return
+                    # Echo their challenge in ADVERTISE
+                    ndp_advertise(iface, my_id, requester_mac=src_mac, requester_id=bytes(l3.src_id), challenge=bytes(n.challenge))
                 elif n.op == NDP_OP_ADVERTISE:
                     if bytes(l3.dst_id) != my_id:
                         return
                     if src_mac == local_mac:
                         return
-                    adv_id  = bytes(n.node_id)
-                    adv_mac = n.mac
-                    if adv_id == my_id:
+                    ok, why = ndp2_validate(n, l3, pkt.src, my_id, role_expected=0x02)
+                    if not ok:
+                        log(f"[NDPv2 ADVERTISE drop] {why}")
                         return
-
-                    ndp_sanitation(n.op, n.node_id, n.mac, n.ed25519_pub, n.x25519_pub, n.nonce, n.sig)
+                    log(_block("NDPv2 LEARN", [
+                        f"peer  : {id_to_hex(bytes(n.self_id))}",
+                        f"mac   : {n.mac}",
+                    ]))
                 return
 
             # L4
@@ -435,11 +672,11 @@ def listen_loop(iface: str, my_id: bytes):
             if not pkt.haslayer(layer4):
                 return
 
-            l4 = pkt[layer4]
+            l4p = pkt[layer4]
             src_id   = bytes(l3.src_id)
-            src_port = int(l4.src_port)
-            dst_port = int(l4.dst_port)
-            payload  = getattr(l4.payload, "load", None) or bytes(l4.payload)
+            src_port = int(l4p.src_port)
+            dst_port = int(l4p.dst_port)
+            payload  = getattr(l4p.payload, "load", None) or bytes(l4p.payload)
 
             ok = publish_to_port(dst_port, src_id, src_port, payload, policy="drop_oldest")
             preview = _safe_payload_preview(payload)
@@ -457,6 +694,8 @@ def listen_loop(iface: str, my_id: bytes):
             time.sleep(0.5)
 
 # ---------------- Port viewers (tail-like) ----------------
+# (unchanged)
+
 def _viewer_loop(port: int, stop_evt: threading.Event):
     log(f"[VIEW] start port={port}")
     while not stop_evt.is_set() and not stop_flag.is_set():
@@ -711,6 +950,7 @@ def handle_command(line: str, iface: str, my_id: bytes):
             f"  {ED25519_PATH} (private)",
             f"  {X25519_PRIV_PATH} (private)",
             f"  {X25519_PUB_PATH}  (public)",
+            f"  {PINS_PATH}  (pins)",
         ]
         log("\n".join(lines))
         return
@@ -719,10 +959,11 @@ def handle_command(line: str, iface: str, my_id: bytes):
 
 # ---------------- Entry ----------------
 def main():
-    ap = argparse.ArgumentParser(description="Mini L3/L4 + NDP over Ethernet — Interactive Node Shell")
+    ap = argparse.ArgumentParser(description="Mini L3/L4 + NDPv2 over Ethernet — Interactive Node Shell")
     ap.add_argument("--iface", required=True, help="Network interface (e.g., enp5s0)")
     ap.add_argument("--new-identity", action="store_true",
                     help="Force-generate a new Ed25519 identity (will overwrite existing!)")
+    ap.add_argument("--psk-file", help="Optional base64/raw PSK file for NDPv2 (enables PSK binding)")
     args = ap.parse_args()
 
     # Identity & encryption keys
@@ -745,10 +986,14 @@ def main():
     xsk, xpk = derive_and_store_x25519(sk, vk)
 
     # ---- expose runtime key material for NDP signing / adverts ----
-    global ED25519_SK, ED25519_PUB_BYTES, X25519_PUB_BYTES
+    global ED25519_SK, ED25519_PUB_BYTES, X25519_PUB_BYTES, PSK_BYTES, _pins
     ED25519_SK         = sk
     ED25519_PUB_BYTES  = bytes(vk)        # 32B
     X25519_PUB_BYTES   = bytes(xpk)       # 32B
+
+    # Load PSK and pins
+    PSK_BYTES = _load_psk(args.psk_file)
+    _pins = _load_pins()
 
     # Nice one-time log on startup
     try:
@@ -761,7 +1006,9 @@ def main():
             f"  files       :\n"
             f"    {ED25519_PATH} (private, 0600)\n"
             f"    {X25519_PRIV_PATH} (private, 0600)\n"
-            f"    {X25519_PUB_PATH}  (public)")
+            f"    {X25519_PUB_PATH}  (public)\n"
+            f"    {PINS_PATH}  (pins)\n"
+            + (f"  NDPv2: PSK enabled ({len(PSK_BYTES)} bytes)" if PSK_BYTES else "  NDPv2: PSK disabled; TOFU pinning active"))
     except Exception:
         pass
 
