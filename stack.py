@@ -189,7 +189,6 @@ class ndp2(Packet):
 
 bind_layers(Ether, layer3, type=ETH_TYPE)
 bind_layers(layer3, ndp2, ptype=PT_NDP)
-bind_layers(layer3, layer4:=Packet, ptype=PT_L4_DGRAM)  # placeholder; actual layer4 defined below
 
 # ---------------- Helpers ----------------
 def gen_node_id(pubkey_bytes: bytes, size: int = ID_LEN) -> bytes:
@@ -237,6 +236,50 @@ def alloc_ephemeral() -> int:
 def _mac_bytes(mac_str: str) -> bytes:
     # "aa:bb:cc:dd:ee:ff" -> b'\xaa\xbb\xcc\xdd\xee\xff'
     return bytes.fromhex(mac_str.replace(":", ""))
+
+def _fmt_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+def _peers_cmd():
+    # prune stale entries before showing
+    _neighbors_prune()
+    with _state_lock:
+        if not neighbors:
+            log("[PEERS] (none)")
+            return
+        log(f"[PEERS] count={len(neighbors)}  TTL={NEIGHBOR_TTL}s  cache={NONCE_CACHE_SIZE}")
+        now = time.time()
+        for nid, ent in neighbors.items():
+            nid_hex = id_to_hex(nid)
+            mac     = ent.get("mac", "??:??:??:??:??:??")
+            last    = _fmt_age(now - ent.get("last_seen", now))
+            ed      = ent.get("ed", b"")
+            x2      = ent.get("x2", b"")
+            # show short key fingerprints (first 8 base64 chars) to keep the TUI compact
+            import base64
+            ed_b64 = base64.b64encode(ed).decode("ascii") if ed else ""
+            x2_b64 = base64.b64encode(x2).decode("ascii") if x2 else ""
+            ed_short = (ed_b64[:8] + "…") if ed_b64 else "(unknown)"
+            x2_short = (x2_b64[:8] + "…") if x2_b64 else "(unknown)"
+            # TOFU pin status
+            pinned = "yes" if (_pins.get(nid_hex) == (ed_b64 if ed_b64 else None)) else "no"
+
+            log(_block("PEER", [
+                f"id     : {nid_hex}",
+                f"mac    : {mac}",
+                f"last   : {last} ago",
+                f"pinned : {pinned}",
+                f"ed25519: {ed_short}",
+                f"x25519 : {x2_short}",
+                f"nonces : {len(ent.get('nonces_set', ()))}/{NONCE_CACHE_SIZE}",
+            ]))
 
 # ---------------- NDPv2 helpers ----------------
 
@@ -754,6 +797,7 @@ Commands:
   pull stop <port>                - stop the live viewer for this port
   pull list                       - list active viewers
   keys                            - show NodeID + public keys + file paths
+  peers                           - list discovered peers
   quit | exit
 """
 
@@ -953,6 +997,10 @@ def handle_command(line: str, iface: str, my_id: bytes):
             f"  {PINS_PATH}  (pins)",
         ]
         log("\n".join(lines))
+        return
+    
+    if cmd == "peers":
+        _peers_cmd()
         return
 
     raise ValueError(f"unknown command: {cmd}")
