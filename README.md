@@ -1,4 +1,4 @@
-I’m writing a tiny network stack in Python for learning and fun. It runs directly over Ethernet, does node discovery, and (optionally) encrypts Layer-3 and above using libsodium. Might get real-world-useful later, but it’s a playground for now.
+I’m writing a tiny network stack in Python for learning and fun. It runs directly over Ethernet, does node discovery, and encrypts Layer-3 and above using libsodium. Might get real-world-useful later, but it’s a playground for now.
 
 Prerequisites
 1) Linux/macOS with Python 3.10+ (No idea if it works on windows)
@@ -20,3 +20,8 @@ Starting the interactive mode:
 3) This generate you an identity along with a signing key + public/private key
 4) To regenerate a fresh idenity do: sudo python3 stack.py --iface *Network_interface* --new-identity
 5) Once in the shell, type help and a list of commands will be present
+
+Optional: Pre-Shared Key (PSK) binding for NDPv2
+1) You can add a PSK to bind discovery to a shared secret:
+2) echo -n "supersecret" > psk.bin
+3) sudo -E python3 stack.py --iface <iface> --psk-file psk.bin
