@@ -1,0 +1,16 @@
+# Malachi Stack Dependencies
+
+# Packet crafting and sniffing
+scapy>=2.5.0
+
+# Ed25519 key generation and signing
+pynacl>=1.5.0
+
+# BLAKE3 hashing for node IDs
+blake3>=0.3.0
+
+# libsodium FFI (crypto_kx, AEAD)
+pysodium>=0.7.0
+
+# X25519 low-level ECDH
+cryptography>=41.0.0
