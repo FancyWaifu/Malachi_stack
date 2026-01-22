@@ -4,8 +4,11 @@ Cryptographic operations for Malachi Stack.
 Handles key management, ECDH, AEAD encryption/decryption, and signatures.
 """
 
+from __future__ import annotations
+
 import os
 import base64
+import binascii
 from pathlib import Path
 from typing import Tuple, Optional
 
@@ -23,6 +26,11 @@ from .config import (
     ID_LEN,
     AEAD_NONCE_LEN,
     SEC_SUITE_XCHACHA20POLY1305,
+    L3_SEC_AD_PREFIX,
+    L4_AD_PREFIX,
+    PADDING_ENABLED,
+    PADDING_BLOCK_SIZE,
+    PADDING_MIN_SIZE,
     ensure_keydir,
     chmod600,
 )
@@ -81,6 +89,11 @@ def hex_to_id(hex_str: str, size: int = ID_LEN) -> bytes:
     Raises:
         ValueError: If hex string is invalid or wrong size
     """
+    # Bounds check to prevent memory issues with very long strings
+    max_input_len = size * 2 + size  # Allow for dashes between each pair
+    if len(hex_str) > max_input_len:
+        raise ValueError(f"Input too long: {len(hex_str)} > {max_input_len}")
+
     hex_str = hex_str.replace("-", "").strip()
     if len(hex_str) != size * 2:
         raise ValueError(f"Expected {size * 2} hex characters, got {len(hex_str)}")
@@ -319,7 +332,7 @@ def aead_decrypt(
 
 def l3_associated_data(suite: int = SEC_SUITE_XCHACHA20POLY1305) -> bytes:
     """Generate associated data for L3 secure container."""
-    return b"MN-L3S|" + bytes([suite])
+    return L3_SEC_AD_PREFIX + bytes([suite])
 
 
 def l4_associated_data(
@@ -327,7 +340,7 @@ def l4_associated_data(
 ) -> bytes:
     """Generate associated data for L4 datagrams."""
     return (
-        b"MN-L4|"
+        L4_AD_PREFIX
         + src_id
         + dst_id
         + src_port.to_bytes(2, "big")
@@ -354,9 +367,10 @@ def load_psk(path: Optional[str]) -> Optional[bytes]:
         data = Path(path).read_bytes().strip()
         try:
             return base64.b64decode(data, validate=True)
-        except Exception:
+        except (ValueError, binascii.Error):
+            # Not valid base64, return as raw bytes
             return data
-    except Exception:
+    except (OSError, IOError):
         return None
 
 
@@ -380,3 +394,57 @@ def compute_psk_tag(
     if psk is None:
         return b"\x00" * PSK_TAG_LEN
     return blake3(psk + self_id + peer_id + challenge).digest()[:PSK_TAG_LEN]
+
+
+# ---------------- Packet Padding ----------------
+
+
+def pad_payload(payload: bytes) -> bytes:
+    """
+    Pad payload to resist traffic analysis.
+
+    Uses ISO/IEC 7816-4 style padding with 0x80 followed by zeros.
+    The padded size is at least PADDING_MIN_SIZE and aligned to PADDING_BLOCK_SIZE.
+
+    Args:
+        payload: Original payload bytes
+
+    Returns:
+        Padded payload bytes
+    """
+    if not PADDING_ENABLED:
+        return payload
+
+    # Calculate target size
+    min_padded = max(len(payload) + 1, PADDING_MIN_SIZE)  # +1 for 0x80 marker
+    target_size = ((min_padded + PADDING_BLOCK_SIZE - 1) // PADDING_BLOCK_SIZE) * PADDING_BLOCK_SIZE
+
+    # Pad with 0x80 followed by zeros
+    padding_needed = target_size - len(payload)
+    return payload + b"\x80" + b"\x00" * (padding_needed - 1)
+
+
+def unpad_payload(padded: bytes) -> bytes:
+    """
+    Remove padding from a padded payload.
+
+    Args:
+        padded: Padded payload bytes
+
+    Returns:
+        Original payload bytes
+
+    Raises:
+        ValueError: If padding is invalid
+    """
+    if not PADDING_ENABLED:
+        return padded
+
+    # Find the 0x80 marker by scanning from the end
+    for i in range(len(padded) - 1, -1, -1):
+        if padded[i] == 0x80:
+            return padded[:i]
+        elif padded[i] != 0x00:
+            raise ValueError("Invalid padding: expected 0x00 or 0x80")
+
+    raise ValueError("Invalid padding: no 0x80 marker found")

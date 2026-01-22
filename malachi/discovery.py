@@ -8,9 +8,15 @@ Provides secure node discovery with:
 - TOFU (Trust On First Use) pinning
 """
 
+from __future__ import annotations
+
 import os
 import base64
-from typing import Tuple, Optional
+import time
+from typing import Tuple, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .packets import NDP2, Layer3
 
 from nacl import signing
 from scapy.all import Ether, sendp, get_if_hwaddr
@@ -224,8 +230,8 @@ class NDPHandler:
 
     def validate_and_store(
         self,
-        ndp_pkt: "NDP2",
-        l3_pkt: "Layer3",
+        ndp_pkt: NDP2,
+        l3_pkt: Layer3,
         l2_src_mac: str,
         role_expected: int,
     ) -> Tuple[bool, str]:
@@ -337,6 +343,7 @@ class NDPHandler:
             )
             entry.key_rx = rx_key
             entry.key_tx = tx_key
+            entry.key_established_at = time.time()
 
             # Cleanup
             self._neighbors.prune_stale()

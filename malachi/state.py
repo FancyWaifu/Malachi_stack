@@ -5,13 +5,15 @@ Provides thread-safe state containers for neighbors, rate limiters,
 challenges, and TOFU pins.
 """
 
+from __future__ import annotations
+
 import os
 import json
 import time
 import threading
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Tuple, Set
+from typing import Optional, Dict, Tuple, Set, List, Any
 from threading import RLock
 
 from .config import (
@@ -29,6 +31,8 @@ from .config import (
     KEYDIR,
     RL_MAX_MACS,
     RL_EVICTION_AGE,
+    SESSION_KEY_TTL,
+    SESSION_KEY_REKEY_THRESHOLD,
 )
 from .logging_setup import log
 
@@ -48,6 +52,33 @@ class NeighborEntry:
     tx_seq: int = 0
     rx_ctr_deque: deque = field(default_factory=lambda: deque(maxlen=RX_CTR_CACHE_SIZE))
     rx_ctr_set: Set[int] = field(default_factory=set)
+    key_established_at: Optional[float] = None  # Timestamp when session keys were set
+
+    def needs_rekey(self) -> bool:
+        """Check if session keys need rotation."""
+        if self.key_established_at is None:
+            return False
+        age = time.time() - self.key_established_at
+        return age >= SESSION_KEY_REKEY_THRESHOLD
+
+    def keys_expired(self) -> bool:
+        """Check if session keys have expired."""
+        if self.key_established_at is None:
+            return True
+        age = time.time() - self.key_established_at
+        return age >= SESSION_KEY_TTL
+
+    def clear_keys(self) -> None:
+        """Clear session keys and reset state for re-keying."""
+        self.key_rx = None
+        self.key_tx = None
+        self.key_established_at = None
+        self.tx_seq = 0
+        # Clear nonce caches on rekey
+        self.nonces_deque.clear()
+        self.nonces_set.clear()
+        self.rx_ctr_deque.clear()
+        self.rx_ctr_set.clear()
 
 
 class NeighborTable:
@@ -121,7 +152,7 @@ class NeighborTable:
                 self._neighbors.pop(nid, None)
             return len(stale)
 
-    def items(self):
+    def items(self) -> List[Tuple[bytes, NeighborEntry]]:
         """Iterate over all neighbors (thread-safe snapshot)."""
         with self._lock:
             return list(self._neighbors.items())
@@ -278,7 +309,10 @@ class PinStore:
         try:
             with open(self._path, "r") as f:
                 return json.load(f)
-        except Exception:
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"[TOFU] WARNING: Failed to load pins from {self._path}: {e}")
             return {}
 
     def _save(self) -> None:
@@ -304,9 +338,9 @@ class PinStore:
                 self._pins[node_id_hex] = ed_pub_b64
                 try:
                     self._save()
-                except Exception:
-                    pass
-                log(f"[TOFU] Pinned {node_id_hex}")
+                    log(f"[TOFU] Pinned {node_id_hex}")
+                except OSError as e:
+                    log(f"[TOFU] WARNING: Failed to save pin for {node_id_hex}: {e}")
                 return True
 
             if existing != ed_pub_b64:

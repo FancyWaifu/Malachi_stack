@@ -4,8 +4,13 @@ Entry point for Malachi Stack.
 Run with: python -m malachi --iface <interface>
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
+import signal
+import sys
+import atexit
 
 from .config import (
     KEYDIR,
@@ -14,6 +19,10 @@ from .config import (
     X25519_PUB_PATH,
     PINS_PATH,
     RuntimeConfig,
+    load_config_file,
+    apply_config_file,
+    save_default_config,
+    CONFIG_FILE,
 )
 from .crypto import (
     init_libsodium,
@@ -24,10 +33,36 @@ from .crypto import (
     load_psk,
 )
 from .logging_setup import setup_logging, log
-from .state import get_pins
+from .state import get_pins, get_stop_flag
 from .discovery import init_ndp_handler
 from .network import init_network
 from .tui import run_shell
+from .preflight import run_preflight_checks, validate_startup
+from .exceptions import InterfaceError
+
+
+def _setup_signal_handlers() -> None:
+    """Configure signal handlers for graceful shutdown."""
+    stop_flag = get_stop_flag()
+
+    def _shutdown_handler(signum: int, frame) -> None:
+        """Handle shutdown signals."""
+        sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+        log(f"[SHUTDOWN] Received {sig_name}, initiating graceful shutdown...")
+        stop_flag.set()
+
+    # Register handlers for common termination signals
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+
+    # SIGHUP for reload (Unix only)
+    if hasattr(signal, 'SIGHUP'):
+        signal.signal(signal.SIGHUP, _shutdown_handler)
+
+
+def _cleanup() -> None:
+    """Cleanup function called at exit."""
+    log("[CLEANUP] Malachi Stack shutting down...")
 
 
 def main():
@@ -37,7 +72,6 @@ def main():
     )
     ap.add_argument(
         "--iface",
-        required=True,
         help="Network interface (e.g., en0, eth0)",
     )
     ap.add_argument(
@@ -60,16 +94,55 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Log level (default: INFO)",
     )
+    ap.add_argument(
+        "--config",
+        help=f"Path to config file (default: {CONFIG_FILE})",
+    )
+    ap.add_argument(
+        "--init-config",
+        action="store_true",
+        help="Generate default configuration file and exit",
+    )
     args = ap.parse_args()
 
-    # Initialize configuration
+    # Generate default config if requested
+    if args.init_config:
+        config_path = args.config or CONFIG_FILE
+        if save_default_config(config_path):
+            print(f"Default configuration saved to: {config_path}")
+            sys.exit(0)
+        else:
+            print(f"Failed to save configuration to: {config_path}")
+            sys.exit(1)
+
+    # Load configuration file
+    file_config = load_config_file(args.config)
+
+    # Initialize configuration (CLI args take precedence over file)
     config = RuntimeConfig(
-        iface=args.iface,
+        iface=args.iface or "",
         psk_path=args.psk_file,
         new_identity=args.new_identity,
         log_to_file=not args.no_log_file,
         log_level=args.log_level,
     )
+
+    # Apply file config as defaults
+    apply_config_file(config, file_config)
+
+    # Validate required arguments
+    if not config.iface:
+        ap.error("--iface is required (or set 'iface' in config file)")
+
+    # Run pre-flight checks
+    print("Running pre-flight checks...")
+    try:
+        validate_startup(config.iface)
+        print("All pre-flight checks passed.\n")
+    except InterfaceError as e:
+        print(f"\nError: {e}")
+        print("\nTry running with sudo or check your interface name.")
+        sys.exit(1)
 
     # Setup logging
     setup_logging(
@@ -77,6 +150,10 @@ def main():
         log_to_tui=True,
         log_level=config.log_level,
     )
+
+    # Setup signal handlers and cleanup
+    _setup_signal_handlers()
+    atexit.register(_cleanup)
 
     # Initialize libsodium
     init_libsodium()

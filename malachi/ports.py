@@ -4,12 +4,14 @@ Port-based message queue system for Malachi Stack.
 Provides UDP-like port binding and message delivery.
 """
 
+from __future__ import annotations
+
 import random
 import threading
 from collections import deque
 from dataclasses import dataclass
 from threading import Condition, RLock
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 from .config import ID_LEN
 from .exceptions import PortAlreadyBoundError, PortNotBoundError, InvalidPortError
@@ -133,18 +135,26 @@ class PortManager:
             entry = self._ports.get(port)
             if entry is None:
                 raise PortNotBoundError(port)
+            queue, condition = entry
 
-        queue, condition = entry
         with condition:
-            if not queue:
-                if timeout == 0:
+            # Re-check queue under condition lock
+            if queue:
+                return queue.popleft()
+
+            if timeout == 0:
+                return None
+            elif timeout is None:
+                while not queue:
+                    condition.wait()
+                    # Check if port was unbound during wait
+                    with self._lock:
+                        if port not in self._ports:
+                            raise PortNotBoundError(port)
+            else:
+                deadline_reached = not condition.wait(timeout=timeout)
+                if deadline_reached and not queue:
                     return None
-                elif timeout is None:
-                    while not queue:
-                        condition.wait()
-                else:
-                    if not condition.wait(timeout=timeout) and not queue:
-                        return None
 
             if queue:
                 return queue.popleft()
@@ -230,7 +240,7 @@ class PortViewer:
             stop_event.set()
             return True
 
-    def list_active(self) -> list[int]:
+    def list_active(self) -> List[int]:
         """List ports with active viewers."""
         with self._lock:
             return list(self._viewers.keys())
@@ -259,7 +269,7 @@ class PortViewer:
                 text = text.replace("\x00", r"\x00")
                 if len(text) > 256:
                     text = text[:256] + "..."
-            except Exception:
+            except (UnicodeDecodeError, AttributeError):
                 text = repr(msg.payload[:256])
 
             log(

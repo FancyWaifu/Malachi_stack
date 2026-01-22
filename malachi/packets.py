@@ -4,6 +4,10 @@ Packet definitions for Malachi Stack.
 Defines Scapy packet structures for L3, L4, NDP, and secure containers.
 """
 
+from __future__ import annotations
+
+from typing import Tuple, Union
+
 from scapy.all import Packet, bind_layers, Ether
 from scapy.fields import (
     StrFixedLenField,
@@ -32,6 +36,8 @@ from .config import (
     INNER_MAGIC,
     L3_MAGIC,
     L3_VERSION,
+    NDP_SIG_PREFIX,
+    PADDING_ENABLED,
 )
 from .exceptions import PacketParseError
 
@@ -134,7 +140,13 @@ def pack_inner_l4(
     Pack inner L4 datagram for encryption.
 
     Format: MAGIC(4) + TYPE(1) + SRC_ID(16) + DST_ID(16) + SRC_PORT(2) + DST_PORT(2) + PAYLOAD
+    Payload is padded if PADDING_ENABLED is True.
     """
+    from .crypto import pad_payload
+
+    if PADDING_ENABLED:
+        payload = pad_payload(payload)
+
     return (
         INNER_MAGIC
         + bytes([PT_L4_DGRAM])
@@ -151,11 +163,17 @@ def pack_inner_data(src_id: bytes, dst_id: bytes, payload: bytes) -> bytes:
     Pack inner DATA packet for encryption.
 
     Format: MAGIC(4) + TYPE(1) + SRC_ID(16) + DST_ID(16) + PAYLOAD
+    Payload is padded if PADDING_ENABLED is True.
     """
+    from .crypto import pad_payload
+
+    if PADDING_ENABLED:
+        payload = pad_payload(payload)
+
     return INNER_MAGIC + bytes([PT_DATA]) + src_id + dst_id + payload
 
 
-def unpack_inner(data: bytes) -> tuple:
+def unpack_inner(data: bytes) -> Tuple[str, ...]:
     """
     Unpack an inner encrypted packet.
 
@@ -169,6 +187,8 @@ def unpack_inner(data: bytes) -> tuple:
     Raises:
         PacketParseError: If packet format is invalid
     """
+    from .crypto import unpad_payload
+
     min_header = len(INNER_MAGIC) + 1 + 2 * ID_LEN
 
     if len(data) < min_header:
@@ -195,10 +215,22 @@ def unpack_inner(data: bytes) -> tuple:
         offset += 2
         dst_port = int.from_bytes(data[offset : offset + 2], "big")
         offset += 2
-        return ("l4", src_id, dst_id, src_port, dst_port, data[offset:])
+        payload = data[offset:]
+        if PADDING_ENABLED:
+            try:
+                payload = unpad_payload(payload)
+            except ValueError as e:
+                raise PacketParseError(f"Invalid padding: {e}")
+        return ("l4", src_id, dst_id, src_port, dst_port, payload)
 
     elif ptype == PT_DATA:
-        return ("data", src_id, dst_id, data[offset:])
+        payload = data[offset:]
+        if PADDING_ENABLED:
+            try:
+                payload = unpad_payload(payload)
+            except ValueError as e:
+                raise PacketParseError(f"Invalid padding: {e}")
+        return ("data", src_id, dst_id, payload)
 
     else:
         raise PacketParseError(f"Unknown inner packet type: {ptype}")
@@ -226,7 +258,7 @@ def ndp_signature_bytes(
     over the exact same data.
     """
     return (
-        b"MNDPv2|"
+        NDP_SIG_PREFIX
         + bytes([op])
         + bytes([role])
         + self_id

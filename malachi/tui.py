@@ -4,6 +4,8 @@ Terminal User Interface for Malachi Stack.
 Provides an interactive curses-based shell for network operations.
 """
 
+from __future__ import annotations
+
 import os
 import time
 import shlex
@@ -11,7 +13,7 @@ import base64
 import curses
 import threading
 from queue import Empty
-from typing import Optional
+from typing import Optional, List, Any
 
 from nacl import signing
 from scapy.all import get_if_hwaddr
@@ -37,6 +39,9 @@ from .network import send_l4
 from .discovery import get_ndp_handler
 from .logging_setup import get_log_queue, log, format_block
 from .exceptions import NoSessionKeyError, PayloadTooLargeError, ValidationError
+from .stats import get_stats_collector
+from .pcap import get_pcap_manager
+from .connection import get_connection_manager
 
 
 HELP_TEXT = """\
@@ -54,6 +59,11 @@ Commands:
   pull list                       - list active viewers
   keys                            - show NodeID + public keys + file paths
   peers                           - list discovered peers
+  stats                           - show packet/network statistics
+  pcap start [name]               - start PCAP capture
+  pcap stop                       - stop PCAP capture
+  pcap status                     - show PCAP capture status
+  conns                           - show connection states
   quit | exit
 """
 
@@ -141,6 +151,18 @@ class CommandHandler:
             self._cmd_peers()
             return
 
+        if cmd == "stats":
+            self._cmd_stats()
+            return
+
+        if cmd == "pcap":
+            self._cmd_pcap(parts)
+            return
+
+        if cmd == "conns":
+            self._cmd_conns()
+            return
+
         raise ValidationError(f"Unknown command: {cmd}")
 
     def _cmd_ports(self) -> None:
@@ -152,7 +174,7 @@ class CommandHandler:
             for port, stats in ports.items():
                 log(f"[PORT] {port} depth={stats['depth']}/{stats['capacity']}")
 
-    def _cmd_bind(self, parts: list[str]) -> None:
+    def _cmd_bind(self, parts: List[str]) -> None:
         """Bind a port."""
         if len(parts) < 2:
             raise ValidationError("Usage: bind <port> [capacity]")
@@ -160,7 +182,7 @@ class CommandHandler:
         capacity = int(parts[2]) if len(parts) >= 3 else 64
         self._port_manager.bind(port, capacity)
 
-    def _cmd_unbind(self, parts: list[str]) -> None:
+    def _cmd_unbind(self, parts: List[str]) -> None:
         """Unbind a port."""
         if len(parts) != 2:
             raise ValidationError("Usage: unbind <port>")
@@ -173,7 +195,7 @@ class CommandHandler:
             return
         self._ndp_handler.send_discover(self.iface)
 
-    def _cmd_pull(self, parts: list[str]) -> None:
+    def _cmd_pull(self, parts: List[str]) -> None:
         """Pull message from port or manage viewers."""
         if len(parts) == 2 and parts[1].lower() == "list":
             active = self._port_viewer.list_active()
@@ -203,7 +225,7 @@ class CommandHandler:
                 try:
                     text = msg.payload.decode("utf-8", "backslashreplace")
                     text = text.replace("\x00", r"\x00")
-                except Exception:
+                except (UnicodeDecodeError, AttributeError):
                     text = repr(msg.payload)
                 log(
                     f"[PULL] src={id_to_hex(msg.src_id)}:{msg.src_port} "
@@ -215,7 +237,7 @@ class CommandHandler:
             "Usage: pull <port> | pull follow <port> | pull stop <port> | pull list"
         )
 
-    def _cmd_send(self, parts: list[str]) -> None:
+    def _cmd_send(self, parts: List[str]) -> None:
         """Send message to peer."""
         if len(parts) < 5:
             raise ValidationError(
@@ -235,12 +257,14 @@ class CommandHandler:
             xpub_b64 = "(missing)"
 
             if os.path.exists(ED25519_PATH):
-                raw = base64.b64decode(open(ED25519_PATH, "rb").read())
+                with open(ED25519_PATH, "rb") as f:
+                    raw = base64.b64decode(f.read())
                 vk = signing.SigningKey(raw).verify_key
                 ed_b64 = base64.b64encode(bytes(vk)).decode("ascii")
 
             if os.path.exists(X25519_PUB_PATH):
-                xpub_b64 = open(X25519_PUB_PATH, "rb").read().decode("ascii")
+                with open(X25519_PUB_PATH, "rb") as f:
+                    xpub_b64 = f.read().decode("ascii")
 
             lines = [
                 f"NodeID      : {id_to_hex(self.my_id)}",
@@ -256,6 +280,55 @@ class CommandHandler:
 
         except Exception as e:
             log(f"[KEYS] Error: {e!r}")
+
+    def _cmd_stats(self) -> None:
+        """Show statistics."""
+        summary = get_stats_collector().format_summary()
+        log(summary)
+
+    def _cmd_pcap(self, parts: List[str]) -> None:
+        """Handle PCAP capture commands."""
+        if len(parts) < 2:
+            raise ValidationError("Usage: pcap start [name] | pcap stop | pcap status")
+
+        subcmd = parts[1].lower()
+        pcap_mgr = get_pcap_manager()
+
+        if subcmd == "start":
+            if pcap_mgr.is_capturing():
+                log("[PCAP] Capture already in progress")
+                return
+            name = parts[2] if len(parts) > 2 else None
+            path = pcap_mgr.start_capture(name)
+            log(f"[PCAP] Started capture: {path}")
+
+        elif subcmd == "stop":
+            if not pcap_mgr.is_capturing():
+                log("[PCAP] No capture in progress")
+                return
+            stats = pcap_mgr.stop_capture()
+            if "combined" in stats:
+                log(f"[PCAP] Stopped. Written {stats['combined']['packets_written']} packets to {stats['combined']['path']}")
+            else:
+                log("[PCAP] Capture stopped")
+
+        elif subcmd == "status":
+            stats = pcap_mgr.stats()
+            if stats["capturing"]:
+                if "combined" in stats:
+                    log(f"[PCAP] Capturing: {stats['combined']['packets_written']} packets to {stats['combined']['path']}")
+                else:
+                    log("[PCAP] Capturing (separate TX/RX)")
+            else:
+                log("[PCAP] Not capturing")
+
+        else:
+            raise ValidationError("Usage: pcap start [name] | pcap stop | pcap status")
+
+    def _cmd_conns(self) -> None:
+        """Show connection states."""
+        summary = get_connection_manager().format_summary()
+        log(summary)
 
     def _cmd_peers(self) -> None:
         """List discovered peers."""
@@ -310,7 +383,7 @@ class CommandHandler:
             )
 
 
-def _wrap_line(text: str, width: int) -> list[str]:
+def _wrap_line(text: str, width: int) -> List[str]:
     """Wrap text to fit within width."""
     if width <= 1:
         return [text]

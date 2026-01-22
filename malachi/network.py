@@ -4,10 +4,12 @@ Network send/receive operations for Malachi Stack.
 Handles packet transmission and the background listener loop.
 """
 
+from __future__ import annotations
+
 import os
 import time
 import threading
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 from scapy.all import Ether, sendp, sniff, get_if_hwaddr
 
@@ -84,7 +86,7 @@ def _safe_payload_preview(payload: bytes, max_len: int = 512) -> str:
         if len(text) > max_len:
             text = text[:max_len] + "..."
         return text
-    except Exception:
+    except (UnicodeDecodeError, AttributeError):
         return repr(payload[:max_len])
 
 
@@ -115,6 +117,15 @@ def send_l3_data(
 
     if entry is None or entry.key_tx is None:
         raise NoSessionKeyError(id_to_hex(dst_id))
+
+    # Check for expired keys
+    if entry.keys_expired():
+        entry.clear_keys()
+        raise NoSessionKeyError(f"{id_to_hex(dst_id)} (keys expired, run 'ndp' to rekey)")
+
+    # Warn if keys need rotation
+    if entry.needs_rekey():
+        log(f"[WARN] Session keys for {short_id(dst_id)} need rotation; run 'ndp'")
 
     # Build inner packet
     inner = pack_inner_data(_my_id, dst_id, payload)
@@ -182,6 +193,15 @@ def send_l4(
 
     if entry is None or entry.key_tx is None:
         raise NoSessionKeyError(id_to_hex(dst_id))
+
+    # Check for expired keys
+    if entry.keys_expired():
+        entry.clear_keys()
+        raise NoSessionKeyError(f"{id_to_hex(dst_id)} (keys expired, run 'ndp' to rekey)")
+
+    # Warn if keys need rotation
+    if entry.needs_rekey():
+        log(f"[WARN] Session keys for {short_id(dst_id)} need rotation; run 'ndp'")
 
     # Build inner packet
     inner = pack_inner_l4(_my_id, dst_id, src_port, dst_port, payload)
@@ -265,7 +285,7 @@ def listen_loop(iface: str) -> None:
             time.sleep(0.5)
 
 
-def _handle_ndp(pkt, l3, local_mac: str, iface: str) -> None:
+def _handle_ndp(pkt: Any, l3: Any, local_mac: str, iface: str) -> None:
     """Handle NDP messages."""
     ndp_handler = get_ndp_handler()
     if ndp_handler is None:
@@ -315,7 +335,7 @@ def _handle_ndp(pkt, l3, local_mac: str, iface: str) -> None:
         )
 
 
-def _handle_secure(pkt, l3, neighbors, port_manager) -> None:
+def _handle_secure(pkt: Any, l3: Any, neighbors: Any, port_manager: Any) -> None:
     """Handle encrypted L3 packets."""
     sm = pkt[SecureMeta]
 
@@ -340,10 +360,9 @@ def _handle_secure(pkt, l3, neighbors, port_manager) -> None:
         log("[L3SEC] Ciphertext too short; drop")
         return
 
-    # Replay check using counter in nonce
-    counter = int.from_bytes(nonce[-8:], "big")
-    if NonceTracker.check_counter(entry, counter):
-        log("[L3SEC] Replay counter; drop")
+    # Replay check using full nonce (not just counter)
+    if NonceTracker.check_nonce(entry, nonce):
+        log("[L3SEC] Replay nonce; drop")
         return
 
     # Decrypt
@@ -397,7 +416,7 @@ def _handle_secure(pkt, l3, neighbors, port_manager) -> None:
         )
 
 
-def _handle_legacy_l4(pkt, l3, neighbors, port_manager) -> None:
+def _handle_legacy_l4(pkt: Any, l3: Any, neighbors: Any, port_manager: Any) -> None:
     """Handle legacy L4 datagrams (with optional encryption)."""
     if bytes(l3.dst_id) != _my_id:
         return

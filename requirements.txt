@@ -14,3 +14,10 @@ pysodium>=0.7.0
 
 # X25519 low-level ECDH
 cryptography>=41.0.0
+
+# Configuration file support
+pyyaml>=6.0
+
+# Testing
+pytest>=7.0.0
+pytest-timeout>=2.0.0

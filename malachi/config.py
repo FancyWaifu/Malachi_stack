@@ -4,6 +4,8 @@ Configuration constants for Malachi Stack.
 All protocol constants, paths, and tunable parameters are centralized here.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -42,6 +44,16 @@ INNER_MAGIC = b"MNi1"  # Inner packet magic for integrity checking
 L3_MAGIC = b"MN"
 L3_VERSION = 1
 
+# Packet padding configuration
+PADDING_ENABLED = True  # Enable traffic analysis protection
+PADDING_BLOCK_SIZE = 64  # Pad to multiples of this size
+PADDING_MIN_SIZE = 128  # Minimum padded payload size
+
+# Protocol magic strings for signatures and associated data
+NDP_SIG_PREFIX = b"MNDPv2|"  # NDP signature transcript prefix
+L3_SEC_AD_PREFIX = b"MN-L3S|"  # L3 secure container associated data prefix
+L4_AD_PREFIX = b"MN-L4|"  # L4 datagram associated data prefix
+
 # Secure suite identifiers
 SEC_SUITE_XCHACHA20POLY1305 = 1
 
@@ -61,6 +73,8 @@ MAX_NEIGHBORS = 1024  # Cap neighbor entries (LRU eviction)
 NEIGHBOR_TTL = 30 * 60  # Seconds; drop if not refreshed (30 min)
 NONCE_CACHE_SIZE = 128  # Recent nonces kept per peer
 RX_CTR_CACHE_SIZE = 1024  # Per-peer replay cache for data-plane counters
+SESSION_KEY_TTL = 60 * 60  # Session keys expire after 1 hour
+SESSION_KEY_REKEY_THRESHOLD = 45 * 60  # Trigger rekey warning after 45 minutes
 
 # Per-MAC rate limits (token buckets)
 NDP_RL_RATE = 5.0   # Tokens per second (per requester MAC)
@@ -83,6 +97,7 @@ X25519_PRIV_PATH = os.path.join(KEYDIR, "x25519.key")    # base64(32B X25519 sec
 X25519_PUB_PATH = os.path.join(KEYDIR, "x25519.pub")     # base64(32B X25519 public)
 PINS_PATH = os.path.join(KEYDIR, "peers.json")           # TOFU pins
 LOG_DIR = os.path.join(KEYDIR, "logs")
+CONFIG_FILE = os.path.join(KEYDIR, "config.yaml")         # YAML configuration file
 
 
 # ---------------- Logging Configuration ----------------
@@ -121,3 +136,107 @@ def chmod600(path: str) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass  # Best effort on non-POSIX filesystems
+
+
+def load_config_file(path: Optional[str] = None) -> dict:
+    """
+    Load configuration from YAML file.
+
+    Args:
+        path: Path to config file (defaults to CONFIG_FILE)
+
+    Returns:
+        Configuration dict (empty if file doesn't exist)
+    """
+    config_path = path or CONFIG_FILE
+
+    if not os.path.exists(config_path):
+        return {}
+
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            data = yaml.safe_load(f)
+            return data if isinstance(data, dict) else {}
+    except ImportError:
+        return {}
+    except Exception:
+        return {}
+
+
+def save_default_config(path: Optional[str] = None) -> bool:
+    """
+    Save default configuration file.
+
+    Args:
+        path: Path to config file (defaults to CONFIG_FILE)
+
+    Returns:
+        True if saved successfully
+    """
+    config_path = path or CONFIG_FILE
+
+    default_config = """\
+# Malachi Stack Configuration
+# https://github.com/FancyWaifu/Malachi_stack
+
+# Network interface to use
+# iface: en0
+
+# Path to pre-shared key file (optional)
+# psk_file: ~/.ministack/psk.key
+
+# Logging settings
+logging:
+  # Enable file logging
+  to_file: true
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+
+# Security settings
+security:
+  # Enable packet padding for traffic analysis resistance
+  padding_enabled: true
+  # Session key TTL in seconds (3600 = 1 hour)
+  session_key_ttl: 3600
+  # Rekey threshold in seconds (2700 = 45 minutes)
+  session_key_rekey_threshold: 2700
+
+# Network settings
+network:
+  # Maximum payload size per frame
+  payload_cap: 1400
+  # Neighbor TTL in seconds
+  neighbor_ttl: 1800
+"""
+
+    try:
+        import yaml
+        ensure_keydir()
+        with open(config_path, "w") as f:
+            f.write(default_config)
+        return True
+    except Exception:
+        return False
+
+
+def apply_config_file(runtime_config: "RuntimeConfig", file_config: dict) -> None:
+    """
+    Apply file configuration to runtime config.
+
+    File config values are used as defaults, CLI args take precedence.
+    """
+    # Network interface
+    if not runtime_config.iface and "iface" in file_config:
+        runtime_config.iface = file_config["iface"]
+
+    # PSK file
+    if not runtime_config.psk_path and "psk_file" in file_config:
+        runtime_config.psk_path = os.path.expanduser(file_config["psk_file"])
+
+    # Logging settings
+    logging_config = file_config.get("logging", {})
+    if "to_file" in logging_config:
+        runtime_config.log_to_file = logging_config["to_file"]
+    if "level" in logging_config:
+        runtime_config.log_level = logging_config["level"]
