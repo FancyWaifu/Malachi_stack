@@ -106,8 +106,24 @@ def parse_node_address(address: str) -> Tuple[Optional[bytes], Optional[str]]:
     return (None, None)
 
 
-def node_id_to_virtual_ip(node_id: bytes) -> str:
-    """Convert a node ID to its virtual IP address."""
+def node_id_to_virtual_ip(node_id) -> str:
+    """
+    Convert a node ID to its virtual IP address.
+
+    Args:
+        node_id: bytes or hex string (32 chars)
+
+    Returns:
+        Virtual IP address string
+    """
+    # Handle string input (hex)
+    if isinstance(node_id, str):
+        node_id = node_id.lower().ljust(32, '0')
+        try:
+            node_id = bytes.fromhex(node_id)
+        except ValueError:
+            return "10.144.0.2"
+
     node_hash = int.from_bytes(node_id[:4], 'big')
     third_octet = (node_hash >> 8) & 0xFF
     fourth_octet = node_hash & 0xFF

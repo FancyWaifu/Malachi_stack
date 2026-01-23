@@ -830,11 +830,23 @@ class MalachiWebUI(BaseHTTPRequestHandler):
     def _get_node_info(self) -> dict:
         """Get current node information."""
         if MalachiWebUI.daemon and MalachiWebUI.daemon.node_id:
-            node_id = MalachiWebUI.daemon.node_id.hex()
+            node_id_bytes = MalachiWebUI.daemon.node_id
+            node_id_hex = node_id_bytes.hex()
+
+            # Calculate virtual IP from bytes
+            if MALACHI_AVAILABLE:
+                virtual_ip = node_id_to_virtual_ip(node_id_hex)
+            else:
+                # Manual calculation
+                node_hash = int.from_bytes(node_id_bytes[:4], 'big')
+                third = (node_hash >> 8) & 0xFF
+                fourth = max(2, node_hash & 0xFF)
+                virtual_ip = f"10.144.{third}.{fourth}"
+
             return {
-                'node_id': node_id,
-                'node_id_short': node_id[:8],
-                'virtual_ip': node_id_to_virtual_ip(node_id) if MALACHI_AVAILABLE else '10.144.0.1',
+                'node_id': node_id_hex,
+                'node_id_short': node_id_hex[:8],
+                'virtual_ip': virtual_ip,
                 'interface': MalachiWebUI.daemon.tun.interface_name if MalachiWebUI.daemon.tun else 'N/A',
                 'running': MalachiWebUI.daemon._running,
             }
