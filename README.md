@@ -12,6 +12,8 @@ Malachi provides a complete networking stack with automatic peer discovery, end-
 - **OS Integration** - Virtual network interface appears in `ifconfig` (mal0/utun)
 - **Cross-Platform** - Linux, macOS, and BSD support
 - **Network Tools** - ping, traceroute, scan, netcat, and more
+- **DNS Resolution** - Access nodes via `http://a1b2c3d4.mli/` URLs
+- **Web UI** - Browser-based control panel for configuration
 - **TOFU Pinning** - Trust-On-First-Use key pinning for peer verification
 - **Optional PSK Binding** - Pre-shared key authentication for enhanced security
 - **Interactive TUI** - Curses-based shell for network operations
@@ -22,6 +24,8 @@ Malachi provides a complete networking stack with automatic peer discovery, end-
 - [Quick Start](#quick-start)
 - [TUN Interface](#tun-interface)
 - [Network Tools](#network-tools)
+- [DNS Resolution (.mli)](#dns-resolution-mli)
+- [Web UI](#web-ui)
 - [Python API](#python-api)
 - [Interactive Shell](#interactive-shell)
 - [Architecture](#architecture)
@@ -344,6 +348,123 @@ python3 -m malachi.tun_interface keys show
 
 ---
 
+## DNS Resolution (.mli)
+
+Access Malachi nodes using human-friendly URLs instead of virtual IPs.
+
+### How It Works
+
+```
+http://a1b2c3d4.mli:8080/  →  http://10.144.195.212:8080/
+     ^^^^^^^^                        ^^^^^^^^^^^^^^
+     Node ID prefix                  Virtual IP (auto-resolved)
+```
+
+### Start the DNS Server
+
+```bash
+# Start DNS server (requires root for port 53)
+sudo python3 -m malachi.dns start
+```
+
+### Configure Your System
+
+**macOS** (automatic):
+```bash
+sudo python3 -m malachi.dns configure
+# Creates /etc/resolver/mli
+```
+
+**Linux** (manual):
+```bash
+# Option 1: dnsmasq
+echo 'server=/mli/127.0.0.1' | sudo tee /etc/dnsmasq.d/malachi.conf
+sudo systemctl restart dnsmasq
+
+# Option 2: systemd-resolved
+sudo mkdir -p /etc/systemd/resolved.conf.d/
+cat << EOF | sudo tee /etc/systemd/resolved.conf.d/malachi.conf
+[Resolve]
+DNS=127.0.0.1
+Domains=~mli
+EOF
+sudo systemctl restart systemd-resolved
+```
+
+### Usage Examples
+
+```bash
+# Access a website hosted on a Malachi node
+curl http://a1b2c3d4.mli:8080/
+
+# Ping by DNS name
+ping a1b2c3d4.mli
+
+# SSH to a node
+ssh user@a1b2c3d4.mli
+
+# Open in browser
+open http://a1b2c3d4.mli:8080/
+```
+
+### Test Resolution
+
+```bash
+# Test without running server
+python3 -m malachi.dns test a1b2c3d4.mli
+
+# Test with dig (when server is running)
+dig @127.0.0.1 a1b2c3d4.mli
+```
+
+---
+
+## Web UI
+
+A browser-based control panel for configuring and monitoring Malachi.
+
+### Start the Web UI
+
+```bash
+python3 -m malachi.webui
+```
+
+Then open: **http://localhost:7890**
+
+### Features
+
+| Tab | Description |
+|-----|-------------|
+| **Dashboard** | Node identity, daemon status, neighbor list |
+| **Tools** | Ping, lookup, and scan with live output |
+| **Config** | Interface selection, DNS setup, identity management |
+| **Logs** | Real-time log viewer |
+
+### Screenshots
+
+**Dashboard:**
+- View your Node ID and Virtual IP
+- See discovered neighbors
+- Start/stop daemon
+- Broadcast discovery
+
+**Tools:**
+- Ping nodes by ID or IP
+- Look up address mappings
+- Scan network for nodes
+
+### Custom Port
+
+```bash
+# Run on different port
+python3 -m malachi.webui --port 8080
+
+# Bind to specific interface
+python3 -m malachi.webui --host 192.168.1.100 --port 8080
+```
+
+---
+
 ## Python API
 
 ### High-Level: Socket API
@@ -505,7 +626,9 @@ malachi/
 ├── routing.py        # Multi-hop routing
 ├── multiface.py      # Multi-interface support
 ├── tun_interface.py  # OS TUN integration
-├── tools.py          # Network utilities
+├── tools.py          # Network utilities (ping, trace, etc.)
+├── dns.py            # DNS resolver for .mli domains
+├── webui.py          # Browser-based control panel
 └── tui.py            # Interactive shell
 ```
 
