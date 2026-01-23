@@ -268,7 +268,8 @@ class TestTunInterfaceBase(unittest.TestCase):
 
     def test_initial_state(self):
         """Check initial state."""
-        self.assertEqual(self.tun.local_ip, "10.144.0.1")
+        # Local IP is derived from node ID: a1b2c3d4 -> 10.144.195.212
+        self.assertEqual(self.tun.local_ip, "10.144.195.212")
         self.assertFalse(self.tun._running)
         self.assertIsNone(self.tun.tun_fd)
 
@@ -278,7 +279,7 @@ class TestTunInterfaceBase(unittest.TestCase):
         ip = self.tun.allocate_ip(other_node)
 
         self.assertTrue(ip.startswith("10.144."))
-        self.assertNotEqual(ip, "10.144.0.1")  # Not our local IP
+        self.assertNotEqual(ip, self.tun.local_ip)  # Not our local IP
 
     def test_allocate_ip_same_node_twice(self):
         """Same node should get same IP."""

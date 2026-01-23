@@ -148,9 +148,6 @@ class TunInterfaceBase(ABC):
         self._mappings: Dict[str, NodeMapping] = {}  # IP -> mapping
         self._reverse_mappings: Dict[bytes, str] = {}  # node_id -> IP
 
-        # Our virtual IP
-        self.local_ip = "10.144.0.1"
-
         # Callbacks
         self._send_callback: Optional[Callable[[bytes, bytes], None]] = None
 
@@ -158,6 +155,24 @@ class TunInterfaceBase(ABC):
         self._running = False
         self._read_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+
+        # Our virtual IP - derived from node ID for consistency
+        self.local_ip = self._calculate_local_ip()
+
+    def _calculate_local_ip(self) -> str:
+        """Calculate our virtual IP from node ID."""
+        if self.node_id:
+            # Derive IP from node ID hash (same algorithm as allocate_ip)
+            node_hash = int.from_bytes(self.node_id[:4], 'big')
+            third_octet = (node_hash >> 8) & 0xFF
+            fourth_octet = node_hash & 0xFF
+            # Avoid .0 and .1
+            if fourth_octet < 2:
+                fourth_octet = 2
+            return f"10.144.{third_octet}.{fourth_octet}"
+        else:
+            # Fallback if no node ID yet
+            return "10.144.0.1"
 
     @abstractmethod
     def create(self) -> bool:
