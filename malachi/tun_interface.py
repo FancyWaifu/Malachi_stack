@@ -1278,16 +1278,32 @@ def malctl_start(with_webui: bool = False, webui_port: int = 7890):
                 print(f"Warning: Could not start Web UI: {e}")
 
         print("\nDaemon running. Press Ctrl+C to stop.")
+        if with_webui:
+            print("Or use the Stop button in the Web UI.")
 
-        # Keep running
+        # Keep running, but check for shutdown signal from Web UI
         while True:
             time.sleep(1)
+
+            # Check if Web UI requested shutdown
+            if with_webui:
+                try:
+                    from .webui import MalachiWebUI
+                    if MalachiWebUI.shutdown_requested:
+                        print("\nShutdown requested from Web UI...")
+                        break
+                except:
+                    pass
 
     except RuntimeError as e:
         print(f"Error: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        daemon.stop()
+        pass
+
+    # Clean shutdown
+    daemon.stop()
+    print("Daemon stopped.")
 
 
 if __name__ == "__main__":

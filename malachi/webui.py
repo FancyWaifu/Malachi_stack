@@ -742,6 +742,7 @@ class MalachiWebUI(BaseHTTPRequestHandler):
     daemon: Optional[MalachiNetworkDaemon] = None
     dns_server = None
     log_buffer: list = []
+    shutdown_requested: bool = False  # Flag for graceful shutdown
 
     def log_message(self, format, *args):
         """Override to capture logs."""
@@ -1032,9 +1033,10 @@ class MalachiWebUI(BaseHTTPRequestHandler):
     def _api_daemon_stop(self):
         """API: Stop daemon."""
         if MalachiWebUI.daemon and MalachiWebUI.daemon._running:
+            MalachiWebUI.shutdown_requested = True
             self._send_json({
-                'success': False,
-                'message': 'Cannot stop daemon from Web UI.\nPress Ctrl+C in the terminal where daemon is running.'
+                'success': True,
+                'message': 'Shutdown signal sent. Daemon will stop in a few seconds...'
             })
         else:
             self._send_json({'success': False, 'message': 'Daemon not running'})
