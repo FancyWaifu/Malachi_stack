@@ -1009,14 +1009,21 @@ class MalachiWebUI(BaseHTTPRequestHandler):
 
     def _api_daemon_start(self):
         """API: Start daemon."""
-        self._send_json({'success': False, 'message': 'Start daemon from command line:\nsudo python3 -m malachi.tun_interface start'})
+        if MalachiWebUI.daemon and MalachiWebUI.daemon._running:
+            self._send_json({'success': False, 'message': 'Daemon is already running'})
+        else:
+            self._send_json({
+                'success': False,
+                'message': 'Start daemon with Web UI from command line:\n\nsudo python3 -m malachi.tun_interface start --webui\n\nThen refresh this page.'
+            })
 
     def _api_daemon_stop(self):
         """API: Stop daemon."""
-        if MalachiWebUI.daemon:
-            MalachiWebUI.daemon.stop()
-            MalachiWebUI.daemon = None
-            self._send_json({'success': True, 'message': 'Daemon stopped'})
+        if MalachiWebUI.daemon and MalachiWebUI.daemon._running:
+            self._send_json({
+                'success': False,
+                'message': 'Cannot stop daemon from Web UI.\nPress Ctrl+C in the terminal where daemon is running.'
+            })
         else:
             self._send_json({'success': False, 'message': 'Daemon not running'})
 
