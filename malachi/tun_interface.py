@@ -1211,14 +1211,16 @@ def malctl_start(with_webui: bool = False, webui_port: int = 7890):
 
     # Generate or load node identity
     try:
-        from .crypto import generate_node_identity
-        node_id, signing_key, _ = generate_node_identity()
-    except ImportError:
+        from .crypto import load_or_create_ed25519, generate_node_id
+        signing_key, verify_key = load_or_create_ed25519()
+        node_id = generate_node_id(bytes(verify_key))
+        print(f"Loaded node identity: {node_id.hex()}")
+    except ImportError as e:
         # Fallback: generate random node ID
         import secrets
         node_id = secrets.token_bytes(16)
         signing_key = None
-        print("Warning: crypto module not available, using random node ID")
+        print(f"Warning: crypto module not available ({e}), using random node ID")
 
     # Detect physical interface
     try:

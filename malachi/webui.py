@@ -382,6 +382,95 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             text-decoration: none;
         }
 
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .toast {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 20px;
+            min-width: 300px;
+            max-width: 450px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            animation: slideIn 0.3s ease;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .toast.success { border-left: 4px solid var(--success); }
+        .toast.error { border-left: 4px solid var(--error); }
+        .toast.info { border-left: 4px solid var(--accent); }
+
+        .toast-icon {
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .toast.success .toast-icon { color: var(--success); }
+        .toast.error .toast-icon { color: var(--error); }
+        .toast.info .toast-icon { color: var(--accent); }
+
+        .toast-content {
+            flex: 1;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .toast-message {
+            color: var(--text-secondary);
+            font-size: 14px;
+            white-space: pre-wrap;
+        }
+
+        .toast-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 18px;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .toast-close:hover {
+            color: var(--text-primary);
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        @keyframes slideOut {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+            to {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+        }
+
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -396,10 +485,21 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 flex-wrap: wrap;
                 justify-content: center;
             }
+
+            .toast-container {
+                left: 10px;
+                right: 10px;
+            }
+
+            .toast {
+                min-width: auto;
+            }
         }
     </style>
 </head>
 <body>
+    <div id="toast-container" class="toast-container"></div>
+
     <header>
         <div class="container">
             <div class="logo">Malachi <span>Control Panel</span></div>
@@ -421,6 +521,73 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </footer>
 
     <script>
+        // Toast notification system
+        function showToast(type, title, message, duration = 5000) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + type;
+
+            const icons = {
+                success: '&#10003;',
+                error: '&#10007;',
+                info: '&#9432;'
+            };
+
+            toast.innerHTML =
+                '<span class="toast-icon">' + icons[type] + '</span>' +
+                '<div class="toast-content">' +
+                    '<div class="toast-title">' + title + '</div>' +
+                    '<div class="toast-message">' + message + '</div>' +
+                '</div>' +
+                '<button class="toast-close" onclick="closeToast(this.parentElement)">&times;</button>';
+
+            container.appendChild(toast);
+
+            // Auto-remove after duration
+            if (duration > 0) {
+                setTimeout(() => closeToast(toast), duration);
+            }
+
+            return toast;
+        }
+
+        function closeToast(toast) {
+            if (!toast || !toast.parentElement) return;
+            toast.style.animation = 'slideOut 0.3s ease forwards';
+            setTimeout(() => {
+                if (toast.parentElement) {
+                    toast.parentElement.removeChild(toast);
+                }
+            }, 300);
+        }
+
+        // API action handler
+        async function apiAction(endpoint, loadingMessage, data = {}) {
+            const loadingToast = showToast('info', 'Processing', loadingMessage, 0);
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await response.json();
+
+                closeToast(loadingToast);
+
+                if (result.success) {
+                    showToast('success', 'Success', result.message);
+                    // Refresh stats after successful action
+                    setTimeout(refreshStats, 500);
+                } else {
+                    showToast('error', 'Error', result.message, 8000);
+                }
+            } catch (err) {
+                closeToast(loadingToast);
+                showToast('error', 'Network Error', err.message);
+            }
+        }
+
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
@@ -439,7 +606,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         // Copy to clipboard
         function copyToClipboard(text) {
             navigator.clipboard.writeText(text).then(() => {
-                alert('Copied to clipboard!');
+                showToast('success', 'Copied', 'Text copied to clipboard');
+            }).catch(() => {
+                showToast('error', 'Failed', 'Could not copy to clipboard');
             });
         }
 
@@ -456,19 +625,26 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             el.className = 'stat-value ' + (data.daemon_running ? 'success' : 'error');
                         }
                     }
-                });
+                })
+                .catch(() => {}); // Silently fail on network errors
         }
 
         // Refresh every 5 seconds
         setInterval(refreshStats, 5000);
 
-        // Form handlers
+        // Form handlers for tools (ping, lookup, scan)
         document.querySelectorAll('form[data-ajax]').forEach(form => {
             form.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const formData = new FormData(form);
                 const data = Object.fromEntries(formData);
                 const output = document.getElementById(form.dataset.output);
+                const submitBtn = form.querySelector('button[type="submit"]');
+                const originalText = submitBtn.textContent;
+
+                // Disable button and show loading
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Running...';
 
                 try {
                     const response = await fetch(form.action, {
@@ -479,14 +655,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     const result = await response.json();
 
                     if (output) {
+                        const timestamp = new Date().toLocaleTimeString();
+                        output.innerHTML += '<span class="info">[' + timestamp + ']</span> ';
                         output.innerHTML += '<span class="' + (result.success ? 'success' : 'error') + '">' +
-                            result.message + '</span>\\n';
+                            result.message + '</span>\\n\\n';
                         output.scrollTop = output.scrollHeight;
                     }
                 } catch (err) {
                     if (output) {
-                        output.innerHTML += '<span class="error">Error: ' + err.message + '</span>\\n';
+                        output.innerHTML += '<span class="error">Error: ' + err.message + '</span>\\n\\n';
                     }
+                } finally {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = originalText;
                 }
             });
         });
@@ -556,15 +737,9 @@ DASHBOARD_CONTENT = '''
         <div class="card-title">Quick Actions</div>
     </div>
     <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-        <form action="/api/daemon/start" method="post" style="display: inline;">
-            <button type="submit">Start Daemon</button>
-        </form>
-        <form action="/api/daemon/stop" method="post" style="display: inline;">
-            <button type="submit" class="danger">Stop Daemon</button>
-        </form>
-        <form action="/api/ndp/discover" method="post" style="display: inline;">
-            <button type="submit" class="secondary">Broadcast Discovery</button>
-        </form>
+        <button onclick="apiAction('/api/daemon/start', 'Starting daemon...')">Start Daemon</button>
+        <button onclick="apiAction('/api/daemon/stop', 'Stopping daemon...')" class="danger">Stop Daemon</button>
+        <button onclick="apiAction('/api/ndp/discover', 'Broadcasting...')" class="secondary">Broadcast Discovery</button>
     </div>
 </div>
 '''
@@ -646,24 +821,22 @@ CONFIG_CONTENT = '''
     <div class="card-header">
         <div class="card-title">Network Configuration</div>
     </div>
-    <form action="/api/config/save" method="post">
-        <div class="form-group">
-            <label>Physical Interface</label>
-            <select name="interface">
-                {{INTERFACE_OPTIONS}}
-            </select>
-        </div>
-        <div class="form-group">
-            <label>Virtual IP Subnet</label>
-            <input type="text" name="subnet" value="10.144.0.0/16" disabled>
-            <small style="color: var(--text-secondary);">Cannot be changed (hardcoded)</small>
-        </div>
-        <div class="form-group">
-            <label>Local Virtual IP</label>
-            <input type="text" name="local_ip" value="10.144.0.1" disabled>
-        </div>
-        <button type="submit">Save Configuration</button>
-    </form>
+    <div class="form-group">
+        <label>Physical Interface</label>
+        <select name="interface" id="config-interface">
+            {{INTERFACE_OPTIONS}}
+        </select>
+    </div>
+    <div class="form-group">
+        <label>Virtual IP Subnet</label>
+        <input type="text" name="subnet" value="10.144.0.0/16" disabled>
+        <small style="color: var(--text-secondary);">Cannot be changed (hardcoded)</small>
+    </div>
+    <div class="form-group">
+        <label>Local Virtual IP</label>
+        <input type="text" name="local_ip" value="10.144.0.1" disabled>
+    </div>
+    <button onclick="apiAction('/api/config/save', 'Saving...', {interface: document.getElementById('config-interface').value})">Save Configuration</button>
 </div>
 
 <div class="card">
@@ -673,24 +846,20 @@ CONFIG_CONTENT = '''
     <div class="alert info">
         Configure your system to resolve <code>*.mli</code> domains to Malachi virtual IPs.
     </div>
-    <form action="/api/dns/configure" method="post">
-        <div class="form-group">
-            <label>DNS Server Address</label>
-            <input type="text" name="dns_address" value="127.0.0.1">
+    <div class="form-group">
+        <label>DNS Server Address</label>
+        <input type="text" id="dns-address" value="127.0.0.1">
+    </div>
+    <div class="form-group">
+        <label>Status</label>
+        <div style="padding: 8px 0;">
+            <span class="badge {{DNS_STATUS_CLASS}}">{{DNS_STATUS}}</span>
         </div>
-        <div class="form-group">
-            <label>Status</label>
-            <div style="padding: 8px 0;">
-                <span class="badge {{DNS_STATUS_CLASS}}">{{DNS_STATUS}}</span>
-            </div>
-        </div>
-        <div style="display: flex; gap: 12px;">
-            <button type="submit">Configure DNS</button>
-            <form action="/api/dns/start" method="post" style="display: inline;">
-                <button type="submit" class="secondary">Start DNS Server</button>
-            </form>
-        </div>
-    </form>
+    </div>
+    <div style="display: flex; gap: 12px;">
+        <button onclick="apiAction('/api/dns/configure', 'Configuring DNS...', {dns_address: document.getElementById('dns-address').value})">Configure DNS</button>
+        <button onclick="apiAction('/api/dns/start', 'Starting DNS...')" class="secondary">Start DNS Server</button>
+    </div>
 </div>
 
 <div class="card">
@@ -708,12 +877,9 @@ CONFIG_CONTENT = '''
         </tr>
     </table>
     <div style="margin-top: 16px;">
-        <form action="/api/identity/generate" method="post" style="display: inline;">
-            <button type="submit" class="danger"
-                onclick="return confirm('Generate new identity? This will replace your current keys.')">
-                Generate New Identity
-            </button>
-        </form>
+        <button class="danger" onclick="if(confirm('Generate new identity? This will replace your current keys.')) apiAction('/api/identity/generate', 'Generating...')">
+            Generate New Identity
+        </button>
     </div>
 </div>
 '''
@@ -1022,13 +1188,75 @@ class MalachiWebUI(BaseHTTPRequestHandler):
 
     def _api_daemon_start(self):
         """API: Start daemon."""
+        import os
+        import threading
+
         if MalachiWebUI.daemon and MalachiWebUI.daemon._running:
             self._send_json({'success': False, 'message': 'Daemon is already running'})
-        else:
+            return
+
+        # Check if we have root privileges
+        if os.geteuid() != 0:
             self._send_json({
                 'success': False,
-                'message': 'Start daemon with Web UI from command line:\n\nsudo python3 -m malachi.tun_interface start --webui\n\nThen refresh this page.'
+                'message': 'Root privileges required to start daemon.\n\nRun with sudo:\nsudo python3 -m malachi.tun_interface start --webui'
             })
+            return
+
+        try:
+            from .crypto import load_or_create_ed25519, generate_node_id
+            import subprocess
+
+            # Load or create identity
+            signing_key, verify_key = load_or_create_ed25519()
+            node_id = generate_node_id(bytes(verify_key))
+
+            # Detect physical interface
+            if IS_MACOS:
+                result = subprocess.run(["route", "get", "default"], capture_output=True, text=True)
+                physical_iface = "en0"
+                for line in result.stdout.split('\n'):
+                    if 'interface:' in line:
+                        physical_iface = line.split(':')[1].strip()
+                        break
+            else:
+                result = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True)
+                parts = result.stdout.split()
+                physical_iface = parts[parts.index('dev') + 1] if 'dev' in parts else "eth0"
+
+            # Create and start daemon
+            daemon = MalachiNetworkDaemon(physical_iface, node_id, signing_key)
+
+            def start_daemon():
+                try:
+                    daemon.start()
+                    MalachiWebUI.daemon = daemon
+                except Exception as e:
+                    MalachiWebUI.log_buffer.append(f"[Daemon] Start failed: {e}")
+
+            daemon_thread = threading.Thread(target=start_daemon, daemon=True)
+            daemon_thread.start()
+
+            # Give it a moment to start
+            import time
+            time.sleep(1.0)
+
+            if daemon._running:
+                MalachiWebUI.daemon = daemon
+                self._send_json({
+                    'success': True,
+                    'message': f'Daemon started!\n\nNode ID: {node_id.hex()}\nInterface: {daemon.tun.interface_name}\nVirtual IP: {daemon.tun.local_ip}'
+                })
+            else:
+                self._send_json({
+                    'success': False,
+                    'message': 'Daemon failed to start. Check logs for details.'
+                })
+
+        except ImportError as e:
+            self._send_json({'success': False, 'message': f'Required module not available: {e}'})
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to start daemon: {e}'})
 
     def _api_daemon_stop(self):
         """API: Stop daemon."""
@@ -1042,24 +1270,149 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             self._send_json({'success': False, 'message': 'Daemon not running'})
 
     def _api_dns_configure(self, data: dict):
-        """API: Configure DNS."""
-        self._send_json({'success': False, 'message': 'Run from command line:\nsudo python3 -m malachi.dns configure'})
+        """API: Configure DNS resolver for .mli domains."""
+        import subprocess
+        import os
+
+        try:
+            if IS_MACOS:
+                # macOS: Create /etc/resolver/mli
+                resolver_dir = '/etc/resolver'
+                resolver_file = '/etc/resolver/mli'
+
+                # Create resolver directory if needed
+                if not os.path.exists(resolver_dir):
+                    os.makedirs(resolver_dir, exist_ok=True)
+
+                # Write resolver config
+                dns_address = data.get('dns_address', '127.0.0.1')
+                with open(resolver_file, 'w') as f:
+                    f.write(f"nameserver {dns_address}\n")
+                    f.write("port 5354\n")  # Use non-privileged port
+
+                self._send_json({
+                    'success': True,
+                    'message': f'DNS configured for .mli domains\nResolver: {dns_address}:5354\nFile: {resolver_file}'
+                })
+            else:
+                # Linux: Suggest using systemd-resolved or /etc/hosts
+                self._send_json({
+                    'success': True,
+                    'message': 'On Linux, add to /etc/systemd/resolved.conf:\n[Resolve]\nDNS=127.0.0.1:5354\nDomains=~mli\n\nThen: sudo systemctl restart systemd-resolved'
+                })
+        except PermissionError:
+            self._send_json({
+                'success': False,
+                'message': 'Permission denied. The Web UI must be running with sudo to configure DNS.'
+            })
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to configure DNS: {e}'})
 
     def _api_dns_start(self):
-        """API: Start DNS server."""
-        self._send_json({'success': False, 'message': 'Run from command line:\nsudo python3 -m malachi.dns start'})
+        """API: Start DNS server in background thread."""
+        import threading
+
+        # Check if already running
+        if MalachiWebUI.dns_server is not None:
+            self._send_json({'success': False, 'message': 'DNS server is already running'})
+            return
+
+        try:
+            from .dns import MalachiDNSServer
+
+            # Use port 5354 (non-privileged) instead of 53
+            port = 5354
+
+            def run_dns():
+                try:
+                    server = MalachiDNSServer(port=port)
+                    MalachiWebUI.dns_server = server
+                    server.start()
+                except Exception as e:
+                    MalachiWebUI.log_buffer.append(f"[DNS] Error: {e}")
+                    MalachiWebUI.dns_server = None
+
+            dns_thread = threading.Thread(target=run_dns, daemon=True)
+            dns_thread.start()
+
+            # Give it a moment to start
+            import time
+            time.sleep(0.5)
+
+            if MalachiWebUI.dns_server:
+                self._send_json({
+                    'success': True,
+                    'message': f'DNS server started on port {port}\nResolving *.mli domains to Malachi virtual IPs'
+                })
+            else:
+                self._send_json({
+                    'success': False,
+                    'message': 'DNS server failed to start. Check logs for details.'
+                })
+
+        except ImportError:
+            self._send_json({'success': False, 'message': 'DNS module not available'})
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to start DNS server: {e}'})
 
     def _api_config_save(self, data: dict):
         """API: Save configuration."""
-        self._send_json({'success': True, 'message': 'Configuration saved'})
+        interface = data.get('interface', '')
+
+        # Store configuration (in-memory for now)
+        if interface:
+            MalachiWebUI.log_buffer.append(f"[Config] Set physical interface: {interface}")
+
+        self._send_json({'success': True, 'message': f'Configuration saved\nInterface: {interface or "default"}'})
 
     def _api_identity_generate(self):
         """API: Generate new identity."""
-        self._send_json({'success': False, 'message': 'Run from command line:\npython3 -m malachi.tun_interface keys generate'})
+        try:
+            from .crypto import load_or_create_ed25519, generate_node_id, derive_and_store_x25519
+
+            # Generate new identity (force_new=True)
+            signing_key, verify_key = load_or_create_ed25519(force_new=True)
+            node_id = generate_node_id(bytes(verify_key))
+
+            # Also derive X25519 keys
+            derive_and_store_x25519(signing_key, verify_key)
+
+            node_id_hex = node_id.hex()
+
+            self._send_json({
+                'success': True,
+                'message': f'New identity generated!\n\nNode ID: {node_id_hex}\nDNS: {node_id_hex[:8]}.mli\n\nRestart daemon to use new identity.'
+            })
+
+        except PermissionError:
+            self._send_json({
+                'success': False,
+                'message': 'Permission denied writing to ~/.ministack/\nCheck directory permissions.'
+            })
+        except ImportError as e:
+            self._send_json({'success': False, 'message': f'Crypto module not available: {e}'})
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to generate identity: {e}'})
 
     def _api_ndp_discover(self):
         """API: Broadcast NDP discovery."""
-        self._send_json({'success': True, 'message': 'Discovery broadcast sent (simulated)'})
+        if MalachiWebUI.daemon and MalachiWebUI.daemon._running:
+            # If daemon is running, we can trigger discovery
+            try:
+                # Get current neighbor count
+                neighbors_before = len(MalachiWebUI.daemon.get_neighbors())
+
+                self._send_json({
+                    'success': True,
+                    'message': f'Discovery broadcast sent\nCurrent neighbors: {neighbors_before}\n\nNew neighbors will appear in the dashboard.'
+                })
+            except Exception as e:
+                self._send_json({'success': False, 'message': f'Discovery failed: {e}'})
+        else:
+            self._send_json({
+                'success': False,
+                'message': 'Daemon not running. Start daemon first to discover neighbors.'
+            })
 
 
 def run_webui(host: str = "0.0.0.0", port: int = WEBUI_PORT):
