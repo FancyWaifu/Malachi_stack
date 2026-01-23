@@ -690,8 +690,26 @@ DASHBOARD_CONTENT = '''
         <div class="stat-value">{{INTERFACE}}</div>
     </div>
     <div class="stat-box">
-        <div class="stat-label">Neighbors</div>
+        <div class="stat-label">Connections</div>
         <div class="stat-value">{{NEIGHBOR_COUNT}}</div>
+        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+            {{DIRECT_COUNT}} direct, {{RELAY_COUNT}} relayed
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title">Network Topology</div>
+        <button onclick="refreshTopology()" class="secondary">Refresh</button>
+    </div>
+    <div id="topology-container" style="position: relative; height: 350px; background: var(--bg-tertiary); border-radius: 6px; overflow: hidden;">
+        <canvas id="topology-canvas" style="width: 100%; height: 100%;"></canvas>
+        <div id="topology-legend" style="position: absolute; bottom: 10px; left: 10px; font-size: 12px; color: var(--text-secondary);">
+            <span style="color: var(--accent);">●</span> You &nbsp;
+            <span style="color: var(--success);">●</span> Direct &nbsp;
+            <span style="color: var(--warning);">●</span> Relayed
+        </div>
     </div>
 </div>
 
@@ -726,10 +744,10 @@ DASHBOARD_CONTENT = '''
 
 <div class="card">
     <div class="card-header">
-        <div class="card-title">Discovered Neighbors</div>
+        <div class="card-title">Route Table</div>
         <button onclick="location.reload()" class="secondary">Refresh</button>
     </div>
-    {{NEIGHBOR_TABLE}}
+    {{ROUTE_TABLE}}
 </div>
 
 <div class="card">
@@ -742,6 +760,164 @@ DASHBOARD_CONTENT = '''
         <button onclick="apiAction('/api/ndp/discover', 'Broadcasting...')" class="secondary">Broadcast Discovery</button>
     </div>
 </div>
+
+<script>
+// Network topology visualization
+let topologyData = {{TOPOLOGY_JSON}};
+
+function drawTopology() {
+    const canvas = document.getElementById('topology-canvas');
+    if (!canvas) return;
+
+    const container = canvas.parentElement;
+    canvas.width = container.clientWidth * 2;
+    canvas.height = container.clientHeight * 2;
+    canvas.style.width = container.clientWidth + 'px';
+    canvas.style.height = container.clientHeight + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.scale(2, 2); // For retina displays
+
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    // Clear canvas
+    ctx.fillStyle = '#21262d';
+    ctx.fillRect(0, 0, width, height);
+
+    const nodes = topologyData.nodes || [];
+    const edges = topologyData.edges || [];
+
+    if (nodes.length === 0) {
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '14px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No connections yet', centerX, centerY);
+        ctx.fillText('Start the daemon and discover neighbors', centerX, centerY + 20);
+        return;
+    }
+
+    // Position nodes in a circle around center
+    const nodePositions = {};
+    const selfNode = nodes.find(n => n.is_self);
+    const otherNodes = nodes.filter(n => !n.is_self);
+
+    // Self at center
+    if (selfNode) {
+        nodePositions[selfNode.id] = { x: centerX, y: centerY };
+    }
+
+    // Others in a circle
+    const radius = Math.min(width, height) * 0.35;
+    otherNodes.forEach((node, i) => {
+        const angle = (2 * Math.PI * i / otherNodes.length) - Math.PI / 2;
+        nodePositions[node.id] = {
+            x: centerX + radius * Math.cos(angle),
+            y: centerY + radius * Math.sin(angle)
+        };
+    });
+
+    // Draw edges
+    edges.forEach(edge => {
+        const from = nodePositions[edge.from];
+        const to = nodePositions[edge.to];
+        if (!from || !to) return;
+
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.strokeStyle = edge.type === 'direct' ? '#3fb950' : '#d29922';
+        ctx.lineWidth = edge.type === 'direct' ? 2 : 1;
+        if (edge.type !== 'direct') {
+            ctx.setLineDash([5, 5]);
+        } else {
+            ctx.setLineDash([]);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Draw latency label on edge
+        if (edge.latency_ms) {
+            const midX = (from.x + to.x) / 2;
+            const midY = (from.y + to.y) / 2;
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(edge.latency_ms.toFixed(0) + 'ms', midX, midY - 5);
+        }
+    });
+
+    // Draw nodes
+    nodes.forEach(node => {
+        const pos = nodePositions[node.id];
+        if (!pos) return;
+
+        const nodeRadius = node.is_self ? 30 : 25;
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, nodeRadius, 0, 2 * Math.PI);
+        if (node.is_self) {
+            ctx.fillStyle = '#58a6ff';
+        } else if (node.type === 'direct') {
+            ctx.fillStyle = '#238636';
+        } else {
+            ctx.fillStyle = '#9e6a03';
+        }
+        ctx.fill();
+        ctx.strokeStyle = '#30363d';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Node label
+        ctx.fillStyle = '#ffffff';
+        ctx.font = node.is_self ? 'bold 11px -apple-system, sans-serif' : '10px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        if (node.is_self) {
+            ctx.fillText('YOU', pos.x, pos.y - 5);
+            ctx.font = '9px -apple-system, sans-serif';
+            ctx.fillText(node.virtual_ip, pos.x, pos.y + 8);
+        } else {
+            ctx.fillText(node.id.substring(0, 8), pos.x, pos.y - 5);
+            ctx.font = '9px -apple-system, sans-serif';
+            ctx.fillStyle = '#c9d1d9';
+            ctx.fillText(node.virtual_ip, pos.x, pos.y + 8);
+        }
+
+        // Hop count badge for non-direct
+        if (!node.is_self && node.hop_count > 1) {
+            ctx.beginPath();
+            ctx.arc(pos.x + nodeRadius - 5, pos.y - nodeRadius + 5, 10, 0, 2 * Math.PI);
+            ctx.fillStyle = '#d29922';
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 9px -apple-system, sans-serif';
+            ctx.fillText(node.hop_count + 'h', pos.x + nodeRadius - 5, pos.y - nodeRadius + 6);
+        }
+    });
+}
+
+function refreshTopology() {
+    fetch('/api/topology')
+        .then(r => r.json())
+        .then(data => {
+            topologyData = data;
+            drawTopology();
+        })
+        .catch(() => {});
+}
+
+// Draw on load and resize
+window.addEventListener('load', drawTopology);
+window.addEventListener('resize', drawTopology);
+
+// Auto-refresh topology every 10 seconds
+setInterval(refreshTopology, 10000);
+</script>
 '''
 
 TOOLS_CONTENT = '''
@@ -932,6 +1108,8 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             self._serve_logs()
         elif path == '/api/stats':
             self._api_stats()
+        elif path == '/api/topology':
+            self._api_topology()
         else:
             self._send_404()
 
@@ -1032,32 +1210,66 @@ class MalachiWebUI(BaseHTTPRequestHandler):
         """Serve dashboard page."""
         info = self._get_node_info()
 
+        # Get topology data
+        topology = {'nodes': [], 'edges': [], 'self_id': info['node_id'], 'self_ip': info['virtual_ip']}
+        routes = {}
+        direct_count = 0
+        relay_count = 0
+
+        if MalachiWebUI.daemon:
+            topology = MalachiWebUI.daemon.get_topology()
+            routes = MalachiWebUI.daemon.get_routes()
+            direct_count = topology.get('direct_connections', 0)
+            relay_count = topology.get('relay_connections', 0)
+
         neighbors = []
         if MalachiWebUI.daemon:
             neighbors = list(MalachiWebUI.daemon.get_neighbors().items())
 
-        if neighbors:
-            neighbor_rows = ''
-            for node_id, vip in neighbors:
-                neighbor_rows += f'''
+        # Build route table with path visualization
+        if routes:
+            route_rows = ''
+            for node_id, route in sorted(routes.items(), key=lambda x: x[1].hop_count):
+                node_hex = node_id.hex()
+                latency_str = f"{route.latency_ms:.1f}ms" if route.latency_ms > 0 else "—"
+                conn_badge = 'success' if route.is_direct else 'warning'
+                conn_type = 'Direct' if route.is_direct else f'{route.hop_count} hops'
+
+                # Build path visualization
+                if route.is_direct:
+                    path_viz = f'<span style="color: var(--success);">You → {node_hex[:8]}</span>'
+                else:
+                    path_parts = ['You']
+                    for hop in route.hops:
+                        hop_hex = hop.hex() if isinstance(hop, bytes) else hop
+                        path_parts.append(hop_hex[:6])
+                    path_parts.append(node_hex[:8])
+                    path_viz = f'<span style="color: var(--warning);">{" → ".join(path_parts)}</span>'
+
+                route_rows += f'''
                 <tr>
-                    <td class="node-id">{node_id.hex()[:16]}...</td>
-                    <td class="ip-address">{vip}</td>
-                    <td><span class="badge success">Online</span></td>
+                    <td class="ip-address">{route.dest_virtual_ip}</td>
+                    <td class="node-id" style="font-size: 11px;">{node_hex[:16]}...</td>
+                    <td><span class="badge {conn_badge}">{conn_type}</span></td>
+                    <td>{latency_str}</td>
+                    <td style="font-size: 11px; font-family: monospace;">{path_viz}</td>
                 </tr>'''
-            neighbor_table = f'''
+
+            route_table = f'''
             <table>
                 <thead>
                     <tr>
-                        <th>Node ID</th>
                         <th>Virtual IP</th>
-                        <th>Status</th>
+                        <th>Node ID</th>
+                        <th>Connection</th>
+                        <th>Latency</th>
+                        <th>Path</th>
                     </tr>
                 </thead>
-                <tbody>{neighbor_rows}</tbody>
+                <tbody>{route_rows}</tbody>
             </table>'''
         else:
-            neighbor_table = '<p style="color: var(--text-secondary);">No neighbors discovered yet.</p>'
+            route_table = '<p style="color: var(--text-secondary);">No routes established. Start the daemon and discover neighbors.</p>'
 
         content = DASHBOARD_CONTENT
         content = content.replace('{{DAEMON_STATUS}}', 'Running' if info['running'] else 'Stopped')
@@ -1065,10 +1277,13 @@ class MalachiWebUI(BaseHTTPRequestHandler):
         content = content.replace('{{PLATFORM}}', PLATFORM.title())
         content = content.replace('{{INTERFACE}}', info['interface'])
         content = content.replace('{{NEIGHBOR_COUNT}}', str(len(neighbors)))
+        content = content.replace('{{DIRECT_COUNT}}', str(direct_count))
+        content = content.replace('{{RELAY_COUNT}}', str(relay_count))
         content = content.replace('{{NODE_ID}}', info['node_id'])
         content = content.replace('{{NODE_ID_SHORT}}', info['node_id_short'])
         content = content.replace('{{VIRTUAL_IP}}', info['virtual_ip'])
-        content = content.replace('{{NEIGHBOR_TABLE}}', neighbor_table)
+        content = content.replace('{{ROUTE_TABLE}}', route_table)
+        content = content.replace('{{TOPOLOGY_JSON}}', json.dumps(topology))
 
         self._serve_html(content)
 
@@ -1131,6 +1346,30 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             'interface': info['interface'],
             'neighbors': len(MalachiWebUI.daemon.get_neighbors()) if MalachiWebUI.daemon else 0,
         })
+
+    def _api_topology(self):
+        """API: Get network topology for visualization."""
+        if MalachiWebUI.daemon:
+            topology = MalachiWebUI.daemon.get_topology()
+            self._send_json(topology)
+        else:
+            # Return empty topology with self node placeholder
+            info = self._get_node_info()
+            self._send_json({
+                'self_id': info['node_id'],
+                'self_ip': info['virtual_ip'],
+                'nodes': [{
+                    'id': info['node_id'],
+                    'label': f"You\\n{info['virtual_ip']}",
+                    'virtual_ip': info['virtual_ip'],
+                    'is_self': True,
+                    'type': 'self'
+                }],
+                'edges': [],
+                'total_neighbors': 0,
+                'direct_connections': 0,
+                'relay_connections': 0
+            })
 
     def _api_ping(self, data: dict):
         """API: Ping a node."""

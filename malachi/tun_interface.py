@@ -102,6 +102,27 @@ class NodeMapping:
     is_local: bool = False
 
 
+@dataclass
+class RouteInfo:
+    """Information about a route to a remote node."""
+    dest_node_id: bytes
+    dest_virtual_ip: str
+    hops: list  # List of intermediate node IDs
+    latency_ms: float = 0.0
+    last_updated: float = field(default_factory=time.time)
+    connection_type: str = "direct"  # "direct", "relay", "mesh"
+    physical_interface: str = ""
+    signal_quality: int = 100  # 0-100%
+
+    @property
+    def hop_count(self) -> int:
+        return len(self.hops) + 1  # +1 for the destination itself
+
+    @property
+    def is_direct(self) -> bool:
+        return len(self.hops) == 0
+
+
 # =============================================================================
 # Abstract Base Class
 # =============================================================================
@@ -803,6 +824,7 @@ class MalachiNetworkDaemon:
         # State
         self._running = False
         self._neighbors: Dict[bytes, str] = {}  # node_id -> virtual_ip
+        self._routes: Dict[bytes, RouteInfo] = {}  # node_id -> route info
         self._lock = threading.Lock()
 
     def start(self):
@@ -840,32 +862,160 @@ class MalachiNetworkDaemon:
         """Set the function used to send packets via Malachi."""
         self._malachi_send_func = func
 
-    def add_neighbor(self, node_id: bytes) -> str:
+    def add_neighbor(
+        self,
+        node_id: bytes,
+        hops: list = None,
+        latency_ms: float = 0.0,
+        connection_type: str = "direct"
+    ) -> str:
         """
-        Add a discovered neighbor.
+        Add a discovered neighbor with route information.
+
+        Args:
+            node_id: The neighbor's node ID
+            hops: List of intermediate node IDs (empty for direct connection)
+            latency_ms: Measured latency to this node
+            connection_type: "direct", "relay", or "mesh"
 
         Returns:
             Virtual IP allocated for this neighbor
         """
         with self._lock:
+            if hops is None:
+                hops = []
+
             if node_id not in self._neighbors:
                 virtual_ip = self.tun.allocate_ip(node_id)
                 self._neighbors[node_id] = virtual_ip
                 logger.info(f"Neighbor added: {node_id.hex()[:8]} -> {virtual_ip}")
-                return virtual_ip
-            return self._neighbors[node_id]
+            else:
+                virtual_ip = self._neighbors[node_id]
+
+            # Update or create route info
+            self._routes[node_id] = RouteInfo(
+                dest_node_id=node_id,
+                dest_virtual_ip=virtual_ip,
+                hops=hops,
+                latency_ms=latency_ms,
+                connection_type=connection_type,
+                physical_interface=self.physical_interface,
+            )
+
+            return virtual_ip
 
     def remove_neighbor(self, node_id: bytes):
-        """Remove a neighbor."""
+        """Remove a neighbor and its route."""
         with self._lock:
             if node_id in self._neighbors:
                 del self._neighbors[node_id]
-                logger.info(f"Neighbor removed: {node_id.hex()[:8]}")
+            if node_id in self._routes:
+                del self._routes[node_id]
+            logger.info(f"Neighbor removed: {node_id.hex()[:8]}")
 
     def get_neighbors(self) -> Dict[bytes, str]:
         """Get all known neighbors."""
         with self._lock:
             return dict(self._neighbors)
+
+    def get_routes(self) -> Dict[bytes, RouteInfo]:
+        """Get all known routes."""
+        with self._lock:
+            return dict(self._routes)
+
+    def get_route(self, node_id: bytes) -> Optional[RouteInfo]:
+        """Get route info for a specific node."""
+        with self._lock:
+            return self._routes.get(node_id)
+
+    def update_route(
+        self,
+        node_id: bytes,
+        latency_ms: float = None,
+        hops: list = None,
+        connection_type: str = None
+    ):
+        """Update route information for a node."""
+        with self._lock:
+            if node_id in self._routes:
+                route = self._routes[node_id]
+                if latency_ms is not None:
+                    route.latency_ms = latency_ms
+                if hops is not None:
+                    route.hops = hops
+                if connection_type is not None:
+                    route.connection_type = connection_type
+                route.last_updated = time.time()
+
+    def get_topology(self) -> dict:
+        """
+        Get the full network topology for visualization.
+
+        Returns:
+            Dictionary with nodes, edges, and connection info
+        """
+        with self._lock:
+            nodes = []
+            edges = []
+
+            # Add self as central node
+            nodes.append({
+                'id': self.node_id.hex(),
+                'label': f"You\n{self.tun.local_ip}",
+                'virtual_ip': self.tun.local_ip,
+                'is_self': True,
+                'type': 'self'
+            })
+
+            # Add neighbors and their connections
+            for node_id, route in self._routes.items():
+                node_hex = node_id.hex()
+                nodes.append({
+                    'id': node_hex,
+                    'label': f"{node_hex[:8]}\n{route.dest_virtual_ip}",
+                    'virtual_ip': route.dest_virtual_ip,
+                    'is_self': False,
+                    'type': route.connection_type,
+                    'latency_ms': route.latency_ms,
+                    'hop_count': route.hop_count
+                })
+
+                if route.is_direct:
+                    # Direct connection to us
+                    edges.append({
+                        'from': self.node_id.hex(),
+                        'to': node_hex,
+                        'type': 'direct',
+                        'latency_ms': route.latency_ms
+                    })
+                else:
+                    # Connection through hops
+                    prev_node = self.node_id.hex()
+                    for hop in route.hops:
+                        hop_hex = hop.hex() if isinstance(hop, bytes) else hop
+                        edges.append({
+                            'from': prev_node,
+                            'to': hop_hex,
+                            'type': 'relay'
+                        })
+                        prev_node = hop_hex
+                    # Final edge to destination
+                    edges.append({
+                        'from': prev_node,
+                        'to': node_hex,
+                        'type': 'relay',
+                        'latency_ms': route.latency_ms
+                    })
+
+            return {
+                'self_id': self.node_id.hex(),
+                'self_ip': self.tun.local_ip,
+                'nodes': nodes,
+                'edges': edges,
+                'total_neighbors': len(self._neighbors),
+                'direct_connections': sum(1 for r in self._routes.values() if r.is_direct),
+                'relay_connections': sum(1 for r in self._routes.values() if not r.is_direct)
+            }
 
     def on_malachi_packet(self, src_node_id: bytes, payload: bytes):
         """
@@ -887,24 +1037,99 @@ class MalachiNetworkDaemon:
             logger.debug(f"Sending {len(payload)} bytes to {dest_node_id.hex()[:8]} (no send function configured)")
 
     def print_status(self):
-        """Print daemon status."""
+        """Print daemon status with network topology."""
         stats = self.tun.get_stats()
-        print(f"\n{'='*60}")
-        print("MALACHI NETWORK DAEMON STATUS")
-        print('='*60)
-        print(f"  Platform:   {stats['platform']}")
-        print(f"  Interface:  {stats['interface']}")
-        print(f"  Node ID:    {self.node_id.hex()}")
-        print(f"  Virtual IP: {stats['local_ip']}")
-        print(f"  Running:    {stats['running']}")
-        print(f"  Neighbors:  {len(self._neighbors)}")
+        topology = self.get_topology()
+
+        print(f"\n{'='*70}")
+        print("                    MALACHI NETWORK DAEMON STATUS")
+        print('='*70)
+        print(f"  Platform:     {stats['platform']}")
+        print(f"  Interface:    {stats['interface']}")
+        print(f"  Node ID:      {self.node_id.hex()}")
+        print(f"  Virtual IP:   {stats['local_ip']}")
+        print(f"  Running:      {stats['running']}")
         print()
 
-        if self._neighbors:
-            print("  Neighbor Mappings:")
-            for node_id, ip in self._neighbors.items():
-                print(f"    {ip:15} -> {node_id.hex()[:16]}...")
+        # Connection summary
+        print(f"  Connections:  {topology['total_neighbors']} total")
+        print(f"                {topology['direct_connections']} direct, {topology['relay_connections']} relayed")
         print()
+
+        # Network topology visualization
+        if self._routes:
+            print('='*70)
+            print("                       NETWORK TOPOLOGY")
+            print('='*70)
+            print()
+            self._print_topology_tree()
+            print()
+
+            # Detailed route table
+            print('-'*70)
+            print("  ROUTE TABLE")
+            print('-'*70)
+            print(f"  {'Virtual IP':<16} {'Node ID':<18} {'Hops':<6} {'Latency':<10} {'Type':<10}")
+            print(f"  {'-'*16} {'-'*18} {'-'*6} {'-'*10} {'-'*10}")
+
+            for node_id, route in sorted(self._routes.items(), key=lambda x: x[1].hop_count):
+                latency_str = f"{route.latency_ms:.1f}ms" if route.latency_ms > 0 else "N/A"
+                print(f"  {route.dest_virtual_ip:<16} {node_id.hex()[:18]} {route.hop_count:<6} {latency_str:<10} {route.connection_type:<10}")
+
+        print()
+
+    def _print_topology_tree(self):
+        """Print ASCII art network topology."""
+        routes = list(self._routes.values())
+
+        if not routes:
+            print("  No connections")
+            return
+
+        # Group by connection type
+        direct = [r for r in routes if r.is_direct]
+        relayed = [r for r in routes if not r.is_direct]
+
+        # Print self node at center
+        self_label = f"[YOU: {self.tun.local_ip}]"
+        print(f"  {' ' * 25}{self_label}")
+        print(f"  {' ' * 25}{'|'}")
+        print(f"  {' ' * 20}{'─' * 5}┴{'─' * 5}")
+
+        # Print direct connections
+        if direct:
+            num_direct = len(direct)
+            spacing = 60 // (num_direct + 1)
+            line1 = "  "
+            line2 = "  "
+            line3 = "  "
+
+            for i, route in enumerate(direct[:6]):  # Max 6 direct connections shown
+                pos = spacing * (i + 1)
+                node_label = f"{route.dest_node_id.hex()[:8]}"
+                ip_label = f"{route.dest_virtual_ip}"
+                latency = f"{route.latency_ms:.0f}ms" if route.latency_ms > 0 else ""
+
+                # Build connection lines
+                line1 += f"{'|':^{spacing}}"
+                line2 += f"{node_label:^{spacing}}"
+                line3 += f"{ip_label} {latency}".center(spacing)
+
+            print(line1)
+            print(line2)
+            print(line3)
+
+        # Print relayed connections
+        if relayed:
+            print()
+            print(f"  {' ' * 20}Relayed connections:")
+            for route in relayed[:4]:  # Max 4 relayed shown
+                path_str = " → ".join([self.node_id.hex()[:6]] +
+                                      [h.hex()[:6] if isinstance(h, bytes) else h[:6] for h in route.hops] +
+                                      [route.dest_node_id.hex()[:6]])
+                latency = f" ({route.latency_ms:.0f}ms)" if route.latency_ms > 0 else ""
+                print(f"  {' ' * 22}{path_str}{latency}")
+                print(f"  {' ' * 22}└─> {route.dest_virtual_ip}")
 
 
 # =============================================================================
