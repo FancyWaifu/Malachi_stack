@@ -70,12 +70,35 @@ MCP_PORT = 7
 
 def parse_node_address(address: str) -> Tuple[Optional[bytes], Optional[str]]:
     """
-    Parse a node address (node ID or virtual IP).
+    Parse a node address (node ID, virtual IP, or .mli domain).
+
+    Supported formats:
+        - Virtual IP: 10.144.x.x
+        - Full node ID: a1b2c3d4e5f67890abcdef1234567890 (32 hex chars)
+        - Short node ID: a1b2c3d4 (8+ hex chars, padded with zeros)
+        - .mli domain: a1b2c3d4.mli or subdomain.a1b2c3d4.mli
 
     Returns:
         (node_id, virtual_ip) - one will be None depending on input type
     """
-    address = address.strip()
+    address = address.strip().lower()
+
+    # Check if it's a .mli domain
+    if address.endswith('.mli'):
+        # Extract node ID from domain: "a1b2c3d4.mli" or "sub.a1b2c3d4.mli"
+        parts = address[:-4].split('.')  # Remove .mli and split
+        # The node ID is the last part before .mli
+        node_id_part = parts[-1] if parts else ''
+
+        # Validate it's a hex string
+        if len(node_id_part) >= 4 and all(c in '0123456789abcdef' for c in node_id_part):
+            # Pad with zeros to make 32 chars
+            padded = node_id_part.ljust(32, '0')
+            try:
+                node_id = bytes.fromhex(padded)
+                return (node_id, None)
+            except:
+                pass
 
     # Check if it's a virtual IP
     if address.startswith("10.144."):
@@ -94,9 +117,9 @@ def parse_node_address(address: str) -> Tuple[Optional[bytes], Optional[str]]:
             pass
 
     # Check if it's a short node ID (prefix)
-    if len(address) >= 8 and all(c in '0123456789abcdefABCDEF' for c in address):
+    if len(address) >= 8 and all(c in '0123456789abcdef' for c in address):
         # Pad with zeros to make 32 chars
-        padded = address.lower().ljust(32, '0')
+        padded = address.ljust(32, '0')
         try:
             node_id = bytes.fromhex(padded)
             return (node_id, None)
