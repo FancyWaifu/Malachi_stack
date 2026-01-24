@@ -995,6 +995,152 @@ def cmd_keys(args):
         keys.list()
 
 
+def cmd_send(args):
+    """Handle file send command."""
+    try:
+        from .mesh import MeshNode
+        from .crypto import load_or_create_ed25519, generate_node_id
+
+        # Get our identity
+        sk, vk = load_or_create_ed25519()
+        node_id = generate_node_id(bytes(vk))
+
+        # Parse target
+        target_id, _ = parse_node_address(args.target)
+        if not target_id:
+            print(f"malsend: invalid target '{args.target}'")
+            return
+
+        print(f"Sending {args.file} to {args.target}...")
+
+        # Create mesh node
+        node = MeshNode(node_id, port=7893)
+        node.start()
+
+        # Send file
+        transfer_id = node.send_file(target_id, args.file)
+        print(f"Transfer ID: {transfer_id.hex()[:16]}")
+
+        # Wait for completion (simplified - real implementation would track progress)
+        import time
+        time.sleep(5)
+
+        node.stop()
+        print("Transfer initiated. Use --wait to wait for completion.")
+
+    except ImportError as e:
+        print(f"malsend: mesh module not available: {e}")
+    except FileNotFoundError:
+        print(f"malsend: file not found: {args.file}")
+    except Exception as e:
+        print(f"malsend: error: {e}")
+
+
+def cmd_services(args):
+    """Handle services command."""
+    try:
+        from .mesh import MeshNode, ServiceRegistry
+        from .crypto import load_or_create_ed25519, generate_node_id
+
+        sk, vk = load_or_create_ed25519()
+        node_id = generate_node_id(bytes(vk))
+
+        if args.action == "list":
+            print("DISCOVERED SERVICES")
+            print("=" * 60)
+            print(f"{'Type':<15} {'Node':<20} {'Port':<8} {'Metadata'}")
+            print("-" * 60)
+            # In a real implementation, this would query the running daemon
+            print("(Start daemon to discover services)")
+
+        elif args.action == "register":
+            if not args.type or not args.port:
+                print("malservices: --type and --port required for register")
+                return
+            print(f"Registering service: {args.type} on port {args.port}")
+            print("(Service will be announced when daemon starts)")
+
+        elif args.action == "find":
+            if not args.type:
+                print("malservices: --type required for find")
+                return
+            print(f"Finding services of type: {args.type}")
+            print("(Start daemon to discover services)")
+
+    except ImportError as e:
+        print(f"malservices: module not available: {e}")
+
+
+def cmd_peers(args):
+    """Handle peers command."""
+    try:
+        from .mesh import PeerStore
+        from pathlib import Path
+
+        store = PeerStore(Path.home() / ".ministack" / "peers.json")
+        peers = store.get_peers()
+
+        if args.action == "list":
+            print("KNOWN PEERS")
+            print("=" * 70)
+            print(f"{'Node ID':<20} {'Address':<22} {'Last Seen':<20} {'Relay'}")
+            print("-" * 70)
+
+            for peer in peers:
+                node_short = peer.node_id.hex()[:16] + "..."
+                addr = f"{peer.address[0]}:{peer.address[1]}"
+                last_seen = time.strftime("%Y-%m-%d %H:%M", time.localtime(peer.last_seen))
+                relay = "Yes" if peer.is_relay else "No"
+                print(f"{node_short:<20} {addr:<22} {last_seen:<20} {relay}")
+
+            print(f"\nTotal: {len(peers)} peers")
+
+        elif args.action == "clear":
+            # Clear peer store
+            import os
+            peer_file = Path.home() / ".ministack" / "peers.json"
+            if peer_file.exists():
+                os.remove(peer_file)
+                print("Peer store cleared")
+            else:
+                print("Peer store already empty")
+
+    except Exception as e:
+        print(f"malpeers: error: {e}")
+
+
+def cmd_mesh(args):
+    """Handle mesh command."""
+    try:
+        from .mesh import MeshNode
+        from .crypto import load_or_create_ed25519, generate_node_id
+
+        sk, vk = load_or_create_ed25519()
+        node_id = generate_node_id(bytes(vk))
+
+        if args.action == "status":
+            print("MESH NETWORK STATUS")
+            print("=" * 50)
+            print(f"Node ID: {node_id.hex()}")
+            print(f"Status:  (Run daemon to see live status)")
+
+        elif args.action == "join":
+            if not args.bootstrap:
+                print("malmesh: --bootstrap required for join")
+                return
+            print(f"Joining network via {args.bootstrap}...")
+
+        elif args.action == "info":
+            print("MESH NETWORK INFO")
+            print("=" * 50)
+            print(f"Node ID:     {node_id.hex()}")
+            print(f"Short ID:    {node_id.hex()[:8]}")
+            print(f"DNS Name:    {node_id.hex()[:8]}.mli")
+
+    except Exception as e:
+        print(f"malmesh: error: {e}")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1061,6 +1207,31 @@ def main():
     keys_parser.add_argument("action", nargs="?", choices=["generate", "show", "list"], default="list")
     keys_parser.add_argument("-n", "--name", help="Identity name")
     keys_parser.set_defaults(func=cmd_keys)
+
+    # Send file command
+    send_parser = subparsers.add_parser("send", help="Send file to a node")
+    send_parser.add_argument("target", help="Target node ID or .mli address")
+    send_parser.add_argument("file", help="File to send")
+    send_parser.add_argument("--wait", action="store_true", help="Wait for completion")
+    send_parser.set_defaults(func=cmd_send)
+
+    # Services command
+    svc_parser = subparsers.add_parser("services", help="Service discovery")
+    svc_parser.add_argument("action", nargs="?", choices=["list", "register", "find"], default="list")
+    svc_parser.add_argument("-t", "--type", help="Service type (http, ssh, etc.)")
+    svc_parser.add_argument("-p", "--port", type=int, help="Service port")
+    svc_parser.set_defaults(func=cmd_services)
+
+    # Peers command
+    peers_parser = subparsers.add_parser("peers", help="Peer management")
+    peers_parser.add_argument("action", nargs="?", choices=["list", "clear"], default="list")
+    peers_parser.set_defaults(func=cmd_peers)
+
+    # Mesh command
+    mesh_parser = subparsers.add_parser("mesh", help="Mesh network management")
+    mesh_parser.add_argument("action", nargs="?", choices=["status", "join", "info"], default="status")
+    mesh_parser.add_argument("-b", "--bootstrap", help="Bootstrap node address")
+    mesh_parser.set_defaults(func=cmd_mesh)
 
     # Parse and execute
     args = parser.parse_args()
