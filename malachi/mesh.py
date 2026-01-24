@@ -550,7 +550,7 @@ class PeerStore:
             with open(self.storage_path, 'w') as f:
                 json.dump({"peers": self.peers, "updated": time.time()}, f, indent=2)
         except Exception as e:
-            logger.warning(f"Failed to save peers: {e}")
+            logger.debug(f"Failed to save peers: {e}")
 
     def add_peer(self, peer: PeerInfo):
         """Add or update a peer."""
@@ -900,8 +900,8 @@ class MeshNode:
             maint_thread.start()
             self._threads.append(maint_thread)
 
-            # Setup file transfer
-            self.file_transfer = FileTransferManager(self.node_id, self.send_reliable)
+            # Setup file transfer (uses send, not send_reliable, because file messages have their own type prefix)
+            self.file_transfer = FileTransferManager(self.node_id, self._send_file_packet)
 
             # Discover NAT
             self.nat.discover_public_address()
@@ -935,6 +935,13 @@ class MeshNode:
         self._threads.clear()
 
         logger.info("Mesh node stopped")
+
+    def _send_file_packet(self, dest_node: bytes, data: bytes) -> bool:
+        """Send a file transfer packet directly to a node."""
+        peer = self.dht.get_peer(dest_node)
+        if peer and peer.is_alive():
+            return self._send_packet(peer.address, data)
+        return False
 
     def send(self, dest_node: bytes, data: bytes) -> bool:
         """Send data to a node (best-effort, no reliability)."""

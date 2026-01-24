@@ -505,6 +505,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <div class="logo">Malachi <span>Control Panel</span></div>
             <nav>
                 <a href="/" class="active">Dashboard</a>
+                <a href="/mesh">Mesh</a>
                 <a href="/tools">Tools</a>
                 <a href="/config">Config</a>
                 <a href="/logs">Logs</a>
@@ -695,6 +696,25 @@ DASHBOARD_CONTENT = '''
         <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
             {{DIRECT_COUNT}} direct, {{RELAY_COUNT}} relayed
         </div>
+    </div>
+</div>
+
+<div class="grid" style="margin-top: 16px;">
+    <div class="stat-box">
+        <div class="stat-label">DHT Peers</div>
+        <div class="stat-value">{{DHT_PEERS}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Services</div>
+        <div class="stat-value">{{SERVICES_COUNT}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Packets In/Out</div>
+        <div class="stat-value" style="font-size: 18px;">{{PACKETS_IN}} / {{PACKETS_OUT}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Forwarded</div>
+        <div class="stat-value">{{FORWARDED}}</div>
     </div>
 </div>
 
@@ -1072,6 +1092,260 @@ LOGS_CONTENT = '''
 </div>
 '''
 
+MESH_CONTENT = '''
+<div class="grid">
+    <div class="stat-box">
+        <div class="stat-label">DHT Peers</div>
+        <div class="stat-value">{{DHT_PEER_COUNT}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Services</div>
+        <div class="stat-value">{{SERVICE_COUNT}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Packets Sent</div>
+        <div class="stat-value">{{PACKETS_SENT}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Packets Received</div>
+        <div class="stat-value">{{PACKETS_RECEIVED}}</div>
+    </div>
+</div>
+
+<div class="tabs">
+    <div class="tab active" data-tab="peers-tab">DHT Peers</div>
+    <div class="tab" data-tab="services-tab">Services</div>
+    <div class="tab" data-tab="files-tab">File Transfer</div>
+    <div class="tab" data-tab="stats-tab">Statistics</div>
+</div>
+
+<div id="peers-tab" class="tab-content active">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">DHT Routing Table</div>
+            <button onclick="refreshPeers()" class="secondary">Refresh</button>
+        </div>
+        <div id="peers-table">
+            {{PEERS_TABLE}}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">Bootstrap Nodes</div>
+        </div>
+        <form id="bootstrap-form" onsubmit="addBootstrap(event)">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Bootstrap Node Address</label>
+                    <input type="text" id="bootstrap-addr" placeholder="hostname:port or IP:port" required>
+                </div>
+                <div class="form-group" style="flex: 0 0 auto;">
+                    <button type="submit">Add</button>
+                </div>
+            </div>
+        </form>
+        <div id="bootstrap-list" style="margin-top: 12px;">
+            {{BOOTSTRAP_LIST}}
+        </div>
+    </div>
+</div>
+
+<div id="services-tab" class="tab-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">Register Service</div>
+        </div>
+        <form id="service-form" onsubmit="registerService(event)">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Service Type</label>
+                    <select id="service-type">
+                        <option value="http">HTTP</option>
+                        <option value="ssh">SSH</option>
+                        <option value="ftp">FTP</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Port</label>
+                    <input type="number" id="service-port" placeholder="8080" required>
+                </div>
+                <div class="form-group" style="flex: 0 0 auto;">
+                    <button type="submit">Register</button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">Discovered Services</div>
+            <button onclick="refreshServices()" class="secondary">Refresh</button>
+        </div>
+        <div id="services-table">
+            {{SERVICES_TABLE}}
+        </div>
+    </div>
+</div>
+
+<div id="files-tab" class="tab-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">Send File</div>
+        </div>
+        <form id="file-form" onsubmit="sendFile(event)">
+            <div class="form-group">
+                <label>Destination Node ID</label>
+                <input type="text" id="file-dest" placeholder="Node ID or *.mli address" required>
+            </div>
+            <div class="form-group">
+                <label>File Path</label>
+                <input type="text" id="file-path" placeholder="/path/to/file" required>
+            </div>
+            <button type="submit">Send File</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">Active Transfers</div>
+            <button onclick="refreshTransfers()" class="secondary">Refresh</button>
+        </div>
+        <div id="transfers-table">
+            {{TRANSFERS_TABLE}}
+        </div>
+    </div>
+</div>
+
+<div id="stats-tab" class="tab-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">Network Statistics</div>
+            <button onclick="refreshStats()" class="secondary">Refresh</button>
+        </div>
+        <div class="grid" style="margin-bottom: 20px;">
+            <div class="stat-box">
+                <div class="stat-label">Bytes Sent</div>
+                <div class="stat-value" id="stat-bytes-sent">{{BYTES_SENT}}</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Bytes Received</div>
+                <div class="stat-value" id="stat-bytes-recv">{{BYTES_RECEIVED}}</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Packets Forwarded</div>
+                <div class="stat-value" id="stat-forwarded">{{PACKETS_FORWARDED}}</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Messages Acked</div>
+                <div class="stat-value" id="stat-acked">{{MESSAGES_ACKED}}</div>
+            </div>
+        </div>
+
+        <h4 style="margin-bottom: 12px; color: var(--text-secondary);">Gossip Protocol</h4>
+        <table>
+            <tr>
+                <td style="width: 200px; color: var(--text-secondary);">Messages Sent</td>
+                <td id="gossip-sent">{{GOSSIP_SENT}}</td>
+            </tr>
+            <tr>
+                <td style="color: var(--text-secondary);">Messages Received</td>
+                <td id="gossip-recv">{{GOSSIP_RECEIVED}}</td>
+            </tr>
+            <tr>
+                <td style="color: var(--text-secondary);">Unique Messages</td>
+                <td id="gossip-unique">{{GOSSIP_UNIQUE}}</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title">NAT Traversal</div>
+        </div>
+        <table>
+            <tr>
+                <td style="width: 200px; color: var(--text-secondary);">Public Address</td>
+                <td id="nat-public">{{NAT_PUBLIC}}</td>
+            </tr>
+            <tr>
+                <td style="color: var(--text-secondary);">NAT Type</td>
+                <td id="nat-type">{{NAT_TYPE}}</td>
+            </tr>
+        </table>
+        <div style="margin-top: 12px;">
+            <button onclick="apiAction('/api/mesh/stun', 'Discovering public address...')" class="secondary">
+                Re-discover Public Address
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+// Mesh API handlers
+async function refreshPeers() {
+    try {
+        const response = await fetch('/api/mesh/peers');
+        const data = await response.json();
+        document.getElementById('peers-table').innerHTML = data.html || '<p>No peers connected</p>';
+    } catch (e) {
+        showToast('error', 'Error', 'Failed to refresh peers');
+    }
+}
+
+async function refreshServices() {
+    try {
+        const response = await fetch('/api/mesh/services');
+        const data = await response.json();
+        document.getElementById('services-table').innerHTML = data.html || '<p>No services discovered</p>';
+    } catch (e) {
+        showToast('error', 'Error', 'Failed to refresh services');
+    }
+}
+
+async function refreshTransfers() {
+    try {
+        const response = await fetch('/api/mesh/transfers');
+        const data = await response.json();
+        document.getElementById('transfers-table').innerHTML = data.html || '<p>No active transfers</p>';
+    } catch (e) {
+        showToast('error', 'Error', 'Failed to refresh transfers');
+    }
+}
+
+async function registerService(event) {
+    event.preventDefault();
+    const type = document.getElementById('service-type').value;
+    const port = document.getElementById('service-port').value;
+    await apiAction('/api/mesh/service/register', 'Registering service...', {type, port: parseInt(port)});
+    refreshServices();
+}
+
+async function sendFile(event) {
+    event.preventDefault();
+    const dest = document.getElementById('file-dest').value;
+    const path = document.getElementById('file-path').value;
+    await apiAction('/api/mesh/file/send', 'Starting file transfer...', {dest, path});
+    refreshTransfers();
+}
+
+async function addBootstrap(event) {
+    event.preventDefault();
+    const addr = document.getElementById('bootstrap-addr').value;
+    await apiAction('/api/mesh/bootstrap/add', 'Adding bootstrap node...', {address: addr});
+    document.getElementById('bootstrap-addr').value = '';
+}
+
+// Auto-refresh
+setInterval(() => {
+    if (document.getElementById('peers-tab').classList.contains('active')) refreshPeers();
+    if (document.getElementById('services-tab').classList.contains('active')) refreshServices();
+    if (document.getElementById('files-tab').classList.contains('active')) refreshTransfers();
+}, 5000);
+</script>
+'''
+
 
 # =============================================================================
 # Web Server
@@ -1100,6 +1374,8 @@ class MalachiWebUI(BaseHTTPRequestHandler):
 
         if path == '/' or path == '/dashboard':
             self._serve_dashboard()
+        elif path == '/mesh':
+            self._serve_mesh()
         elif path == '/tools':
             self._serve_tools()
         elif path == '/config':
@@ -1110,6 +1386,14 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             self._api_stats()
         elif path == '/api/topology':
             self._api_topology()
+        elif path == '/api/mesh/peers':
+            self._api_mesh_peers()
+        elif path == '/api/mesh/services':
+            self._api_mesh_services()
+        elif path == '/api/mesh/transfers':
+            self._api_mesh_transfers()
+        elif path == '/api/mesh/stats':
+            self._api_mesh_stats()
         else:
             self._send_404()
 
@@ -1147,6 +1431,14 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             self._api_identity_generate()
         elif path == '/api/ndp/discover':
             self._api_ndp_discover()
+        elif path == '/api/mesh/service/register':
+            self._api_mesh_service_register(data)
+        elif path == '/api/mesh/file/send':
+            self._api_mesh_file_send(data)
+        elif path == '/api/mesh/bootstrap/add':
+            self._api_mesh_bootstrap_add(data)
+        elif path == '/api/mesh/stun':
+            self._api_mesh_stun()
         else:
             self._send_json({'success': False, 'message': 'Unknown endpoint'})
 
@@ -1216,11 +1508,28 @@ class MalachiWebUI(BaseHTTPRequestHandler):
         direct_count = 0
         relay_count = 0
 
+        # Mesh stats
+        dht_peers = 0
+        services_count = 0
+        packets_in = 0
+        packets_out = 0
+        forwarded = 0
+
         if MalachiWebUI.daemon:
             topology = MalachiWebUI.daemon.get_topology()
             routes = MalachiWebUI.daemon.get_routes()
             direct_count = topology.get('direct_connections', 0)
             relay_count = topology.get('relay_connections', 0)
+
+            # Get mesh node stats if available
+            mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None)
+            if mesh_node:
+                stats = mesh_node.stats()
+                dht_peers = len(mesh_node.dht.get_all_peers())
+                services_count = len(mesh_node.services.local_services) + len(mesh_node.services.remote_services)
+                packets_in = stats.get('packets_received', 0)
+                packets_out = stats.get('packets_sent', 0)
+                forwarded = stats.get('packets_forwarded', 0)
 
         neighbors = []
         if MalachiWebUI.daemon:
@@ -1284,6 +1593,11 @@ class MalachiWebUI(BaseHTTPRequestHandler):
         content = content.replace('{{VIRTUAL_IP}}', info['virtual_ip'])
         content = content.replace('{{ROUTE_TABLE}}', route_table)
         content = content.replace('{{TOPOLOGY_JSON}}', json.dumps(topology))
+        content = content.replace('{{DHT_PEERS}}', str(dht_peers))
+        content = content.replace('{{SERVICES_COUNT}}', str(services_count))
+        content = content.replace('{{PACKETS_IN}}', str(packets_in))
+        content = content.replace('{{PACKETS_OUT}}', str(packets_out))
+        content = content.replace('{{FORWARDED}}', str(forwarded))
 
         self._serve_html(content)
 
@@ -1652,6 +1966,365 @@ class MalachiWebUI(BaseHTTPRequestHandler):
                 'success': False,
                 'message': 'Daemon not running. Start daemon first to discover neighbors.'
             })
+
+    def _serve_mesh(self):
+        """Serve mesh networking page."""
+        info = self._get_node_info()
+
+        # Get mesh node if available
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+
+        # DHT stats
+        dht_peer_count = 0
+        service_count = 0
+        packets_sent = 0
+        packets_received = 0
+        packets_forwarded = 0
+        bytes_sent = 0
+        bytes_received = 0
+        messages_acked = 0
+        gossip_sent = 0
+        gossip_received = 0
+        gossip_unique = 0
+        nat_public = "Unknown"
+        nat_type = "Unknown"
+
+        if mesh_node:
+            stats = mesh_node.stats()
+            dht_peer_count = len(mesh_node.dht.get_all_peers())
+            service_count = len(mesh_node.services.local_services) + len(mesh_node.services.remote_services)
+            packets_sent = stats.get('packets_sent', 0)
+            packets_received = stats.get('packets_received', 0)
+            packets_forwarded = stats.get('packets_forwarded', 0)
+            bytes_sent = self._format_bytes(stats.get('bytes_sent', 0))
+            bytes_received = self._format_bytes(stats.get('bytes_received', 0))
+            messages_acked = stats.get('messages_acked', 0)
+
+            if mesh_node.nat.public_address:
+                nat_public = f"{mesh_node.nat.public_address[0]}:{mesh_node.nat.public_address[1]}"
+                nat_type = "Discovered"
+
+        # Build peers table
+        peers_table = self._build_peers_table(mesh_node)
+
+        # Build services table
+        services_table = self._build_services_table(mesh_node)
+
+        # Build transfers table
+        transfers_table = self._build_transfers_table(mesh_node)
+
+        # Bootstrap list
+        bootstrap_list = '<p style="color: var(--text-secondary);">No bootstrap nodes configured</p>'
+
+        content = MESH_CONTENT
+        content = content.replace('{{DHT_PEER_COUNT}}', str(dht_peer_count))
+        content = content.replace('{{SERVICE_COUNT}}', str(service_count))
+        content = content.replace('{{PACKETS_SENT}}', str(packets_sent))
+        content = content.replace('{{PACKETS_RECEIVED}}', str(packets_received))
+        content = content.replace('{{PACKETS_FORWARDED}}', str(packets_forwarded))
+        content = content.replace('{{BYTES_SENT}}', str(bytes_sent))
+        content = content.replace('{{BYTES_RECEIVED}}', str(bytes_received))
+        content = content.replace('{{MESSAGES_ACKED}}', str(messages_acked))
+        content = content.replace('{{GOSSIP_SENT}}', str(gossip_sent))
+        content = content.replace('{{GOSSIP_RECEIVED}}', str(gossip_received))
+        content = content.replace('{{GOSSIP_UNIQUE}}', str(gossip_unique))
+        content = content.replace('{{NAT_PUBLIC}}', nat_public)
+        content = content.replace('{{NAT_TYPE}}', nat_type)
+        content = content.replace('{{PEERS_TABLE}}', peers_table)
+        content = content.replace('{{SERVICES_TABLE}}', services_table)
+        content = content.replace('{{TRANSFERS_TABLE}}', transfers_table)
+        content = content.replace('{{BOOTSTRAP_LIST}}', bootstrap_list)
+
+        self._serve_html(content)
+
+    def _format_bytes(self, num_bytes: int) -> str:
+        """Format bytes to human readable."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if num_bytes < 1024:
+                return f"{num_bytes:.1f} {unit}"
+            num_bytes /= 1024
+        return f"{num_bytes:.1f} TB"
+
+    def _build_peers_table(self, mesh_node) -> str:
+        """Build HTML table of DHT peers."""
+        if not mesh_node:
+            return '<p style="color: var(--text-secondary);">Mesh node not running. Start the daemon first.</p>'
+
+        peers = mesh_node.dht.get_all_peers()
+        if not peers:
+            return '<p style="color: var(--text-secondary);">No peers discovered yet.</p>'
+
+        rows = ''
+        for peer in peers[:50]:  # Limit to 50
+            node_hex = peer.node_id.hex()
+            addr = f"{peer.address[0]}:{peer.address[1]}"
+            status = 'success' if peer.is_alive() else 'warning'
+            last_seen = time.strftime('%H:%M:%S', time.localtime(peer.last_seen)) if peer.last_seen else '—'
+            relay_badge = '<span class="badge warning">Relay</span>' if peer.is_relay else ''
+
+            rows += f'''
+            <tr>
+                <td class="node-id" style="font-size: 11px;">{node_hex[:16]}...</td>
+                <td class="ip-address">{addr}</td>
+                <td><span class="badge {status}">{'Active' if peer.is_alive() else 'Stale'}</span> {relay_badge}</td>
+                <td>{last_seen}</td>
+            </tr>'''
+
+        return f'''
+        <table>
+            <thead>
+                <tr>
+                    <th>Node ID</th>
+                    <th>Address</th>
+                    <th>Status</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>'''
+
+    def _build_services_table(self, mesh_node) -> str:
+        """Build HTML table of discovered services."""
+        if not mesh_node:
+            return '<p style="color: var(--text-secondary);">Mesh node not running.</p>'
+
+        local_services = list(mesh_node.services.local_services.values())
+        remote_services = list(mesh_node.services.remote_services.values())
+
+        if not local_services and not remote_services:
+            return '<p style="color: var(--text-secondary);">No services registered or discovered.</p>'
+
+        rows = ''
+        for svc in local_services:
+            rows += f'''
+            <tr>
+                <td><span class="badge success">Local</span></td>
+                <td>{svc.service_type}</td>
+                <td>{svc.port}</td>
+                <td class="node-id" style="font-size: 11px;">You</td>
+            </tr>'''
+
+        for svc in remote_services:
+            node_hex = svc.node_id.hex() if svc.node_id else '—'
+            rows += f'''
+            <tr>
+                <td><span class="badge info">Remote</span></td>
+                <td>{svc.service_type}</td>
+                <td>{svc.port}</td>
+                <td class="node-id" style="font-size: 11px;">{node_hex[:16]}...</td>
+            </tr>'''
+
+        return f'''
+        <table>
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>Service</th>
+                    <th>Port</th>
+                    <th>Node</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>'''
+
+    def _build_transfers_table(self, mesh_node) -> str:
+        """Build HTML table of file transfers."""
+        if not mesh_node:
+            return '<p style="color: var(--text-secondary);">Mesh node not running.</p>'
+
+        outgoing = mesh_node.file_transfer.outgoing
+        incoming = mesh_node.file_transfer.incoming
+
+        if not outgoing and not incoming:
+            return '<p style="color: var(--text-secondary);">No active file transfers.</p>'
+
+        rows = ''
+        for tid, transfer in outgoing.items():
+            progress = len(transfer.get('acked_chunks', set())) / max(1, transfer.get('total_chunks', 1)) * 100
+            dest_hex = transfer.get('dest', b'').hex()[:8] if transfer.get('dest') else '—'
+            rows += f'''
+            <tr>
+                <td><span class="badge info">Sending</span></td>
+                <td>{transfer.get('filename', 'Unknown')}</td>
+                <td>{dest_hex}...</td>
+                <td>
+                    <div style="background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; height: 20px;">
+                        <div style="background: var(--accent); width: {progress:.0f}%; height: 100%;"></div>
+                    </div>
+                    <span style="font-size: 11px;">{progress:.0f}%</span>
+                </td>
+            </tr>'''
+
+        for tid, transfer in incoming.items():
+            progress = transfer.progress * 100 if hasattr(transfer, 'progress') else 0
+            rows += f'''
+            <tr>
+                <td><span class="badge success">Receiving</span></td>
+                <td>{transfer.filename if hasattr(transfer, 'filename') else 'Unknown'}</td>
+                <td>—</td>
+                <td>
+                    <div style="background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; height: 20px;">
+                        <div style="background: var(--success); width: {progress:.0f}%; height: 100%;"></div>
+                    </div>
+                    <span style="font-size: 11px;">{progress:.0f}%</span>
+                </td>
+            </tr>'''
+
+        return f'''
+        <table>
+            <thead>
+                <tr>
+                    <th>Direction</th>
+                    <th>Filename</th>
+                    <th>Peer</th>
+                    <th>Progress</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>'''
+
+    def _api_mesh_peers(self):
+        """API: Get DHT peers."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        html = self._build_peers_table(mesh_node)
+        self._send_json({'success': True, 'html': html})
+
+    def _api_mesh_services(self):
+        """API: Get discovered services."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        html = self._build_services_table(mesh_node)
+        self._send_json({'success': True, 'html': html})
+
+    def _api_mesh_transfers(self):
+        """API: Get active file transfers."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        html = self._build_transfers_table(mesh_node)
+        self._send_json({'success': True, 'html': html})
+
+    def _api_mesh_stats(self):
+        """API: Get detailed mesh stats."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        if not mesh_node:
+            self._send_json({'success': False, 'message': 'Mesh node not running'})
+            return
+
+        stats = mesh_node.stats()
+        self._send_json({
+            'success': True,
+            'stats': stats,
+            'dht_peers': len(mesh_node.dht.get_all_peers()),
+            'services': len(mesh_node.services.local_services) + len(mesh_node.services.remote_services),
+        })
+
+    def _api_mesh_service_register(self, data: dict):
+        """API: Register a service."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        if not mesh_node:
+            self._send_json({'success': False, 'message': 'Mesh node not running. Start daemon first.'})
+            return
+
+        service_type = data.get('type', 'custom')
+        port = data.get('port', 0)
+
+        if not port:
+            self._send_json({'success': False, 'message': 'Port is required'})
+            return
+
+        try:
+            mesh_node.register_service(service_type, int(port))
+            self._send_json({
+                'success': True,
+                'message': f'Service registered!\n\nType: {service_type}\nPort: {port}\n\nOther nodes will discover this service via gossip.'
+            })
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to register service: {e}'})
+
+    def _api_mesh_file_send(self, data: dict):
+        """API: Send a file to a node."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        if not mesh_node:
+            self._send_json({'success': False, 'message': 'Mesh node not running. Start daemon first.'})
+            return
+
+        dest = data.get('dest', '')
+        filepath = data.get('path', '')
+
+        if not dest or not filepath:
+            self._send_json({'success': False, 'message': 'Destination and file path are required'})
+            return
+
+        if not os.path.exists(filepath):
+            self._send_json({'success': False, 'message': f'File not found: {filepath}'})
+            return
+
+        try:
+            # Parse destination
+            if dest.endswith('.mli'):
+                # Convert .mli address to node ID
+                dest_hex = dest[:-4].split('.')[-1]
+                dest_node = bytes.fromhex(dest_hex.ljust(32, '0'))
+            else:
+                dest_node = bytes.fromhex(dest)
+
+            transfer_id = mesh_node.send_file(dest_node, filepath)
+            self._send_json({
+                'success': True,
+                'message': f'File transfer started!\n\nFile: {os.path.basename(filepath)}\nDestination: {dest}\nTransfer ID: {transfer_id.hex()[:16]}...'
+            })
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to start transfer: {e}'})
+
+    def _api_mesh_bootstrap_add(self, data: dict):
+        """API: Add a bootstrap node."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        if not mesh_node:
+            self._send_json({'success': False, 'message': 'Mesh node not running. Start daemon first.'})
+            return
+
+        address = data.get('address', '')
+        if not address:
+            self._send_json({'success': False, 'message': 'Address is required (format: host:port)'})
+            return
+
+        try:
+            if ':' in address:
+                host, port = address.rsplit(':', 1)
+                port = int(port)
+            else:
+                host = address
+                port = 7891  # Default port
+
+            # Add to bootstrap list and try to connect
+            mesh_node.bootstrap_nodes.append((host, port))
+
+            self._send_json({
+                'success': True,
+                'message': f'Bootstrap node added!\n\nAddress: {host}:{port}\n\nNode will attempt to connect and discover peers.'
+            })
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'Failed to add bootstrap node: {e}'})
+
+    def _api_mesh_stun(self):
+        """API: Re-discover public address via STUN."""
+        mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
+        if not mesh_node:
+            self._send_json({'success': False, 'message': 'Mesh node not running. Start daemon first.'})
+            return
+
+        try:
+            public_addr = mesh_node.nat.discover_public_address()
+            if public_addr:
+                self._send_json({
+                    'success': True,
+                    'message': f'Public address discovered!\n\nIP: {public_addr[0]}\nPort: {public_addr[1]}'
+                })
+            else:
+                self._send_json({
+                    'success': False,
+                    'message': 'Could not discover public address.\n\nThis may be due to restrictive NAT or firewall settings.'
+                })
+        except Exception as e:
+            self._send_json({'success': False, 'message': f'STUN discovery failed: {e}'})
 
 
 def run_webui(host: str = "0.0.0.0", port: int = WEBUI_PORT):

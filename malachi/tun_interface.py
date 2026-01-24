@@ -842,6 +842,9 @@ class MalachiNetworkDaemon:
         self._routes: Dict[bytes, RouteInfo] = {}  # node_id -> route info
         self._lock = threading.Lock()
 
+        # Mesh networking node (initialized on start)
+        self.mesh_node = None
+
     def start(self):
         """Start the daemon."""
         logger.info(f"Starting Malachi Network Daemon on {PLATFORM}...")
@@ -861,14 +864,53 @@ class MalachiNetworkDaemon:
         self.tun.start()
 
         self._running = True
+
+        # Start mesh networking node
+        try:
+            from .mesh import MeshNode
+            self.mesh_node = MeshNode(self.node_id, port=7891)
+            if self.mesh_node.start():
+                logger.info("Mesh networking node started")
+
+                # Set up message handler to integrate with TUN
+                def on_mesh_message(src_node: bytes, data: bytes):
+                    # Deliver received mesh messages to TUN interface
+                    self.on_malachi_packet(src_node, data)
+
+                self.mesh_node.on_message(on_mesh_message)
+
+                # Use mesh node for sending
+                self._malachi_send_func = self.mesh_node.send
+            else:
+                logger.warning("Failed to start mesh node, continuing without mesh networking")
+                self.mesh_node = None
+        except ImportError as e:
+            logger.warning(f"Mesh module not available: {e}")
+            self.mesh_node = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize mesh node: {e}")
+            self.mesh_node = None
+
         logger.info(f"Malachi daemon started on {self.tun.interface_name}")
         logger.info(f"  Platform:   {PLATFORM}")
         logger.info(f"  Node ID:    {self.node_id.hex()}")
         logger.info(f"  Virtual IP: {self.tun.local_ip}")
+        if self.mesh_node:
+            logger.info(f"  Mesh Port:  7891")
 
     def stop(self):
         """Stop the daemon."""
         self._running = False
+
+        # Stop mesh node
+        if self.mesh_node:
+            try:
+                self.mesh_node.stop()
+                logger.info("Mesh node stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping mesh node: {e}")
+            self.mesh_node = None
+
         self.tun.stop()
         self.tun.destroy()
         logger.info("Malachi daemon stopped")
