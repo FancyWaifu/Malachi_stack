@@ -1014,6 +1014,7 @@ class MalachiNetworkDaemon:
         with self._lock:
             nodes = []
             edges = []
+            seen_nodes = set()
 
             # Add self as central node
             nodes.append({
@@ -1023,10 +1024,15 @@ class MalachiNetworkDaemon:
                 'is_self': True,
                 'type': 'self'
             })
+            seen_nodes.add(self.node_id.hex())
 
-            # Add neighbors and their connections
+            # Add neighbors from internal routes
             for node_id, route in self._routes.items():
                 node_hex = node_id.hex()
+                if node_hex in seen_nodes:
+                    continue
+                seen_nodes.add(node_hex)
+
                 nodes.append({
                     'id': node_hex,
                     'label': f"{node_hex[:8]}\n{route.dest_virtual_ip}",
@@ -1038,7 +1044,6 @@ class MalachiNetworkDaemon:
                 })
 
                 if route.is_direct:
-                    # Direct connection to us
                     edges.append({
                         'from': self.node_id.hex(),
                         'to': node_hex,
@@ -1046,7 +1051,6 @@ class MalachiNetworkDaemon:
                         'latency_ms': route.latency_ms
                     })
                 else:
-                    # Connection through hops
                     prev_node = self.node_id.hex()
                     for hop in route.hops:
                         hop_hex = hop.hex() if isinstance(hop, bytes) else hop
@@ -1056,7 +1060,6 @@ class MalachiNetworkDaemon:
                             'type': 'relay'
                         })
                         prev_node = hop_hex
-                    # Final edge to destination
                     edges.append({
                         'from': prev_node,
                         'to': node_hex,
@@ -1064,14 +1067,53 @@ class MalachiNetworkDaemon:
                         'latency_ms': route.latency_ms
                     })
 
+            # Also add peers from mesh node DHT
+            if self.mesh_node:
+                try:
+                    dht_peers = self.mesh_node.dht.get_all_peers()
+                    for peer in dht_peers:
+                        node_hex = peer.node_id.hex()
+                        if node_hex in seen_nodes:
+                            continue
+                        seen_nodes.add(node_hex)
+
+                        # Calculate virtual IP from node ID
+                        node_hash = int.from_bytes(peer.node_id[:4], 'big')
+                        third = (node_hash >> 8) & 0xFF
+                        fourth = max(2, node_hash & 0xFF)
+                        virtual_ip = f"10.144.{third}.{fourth}"
+
+                        nodes.append({
+                            'id': node_hex,
+                            'label': f"{node_hex[:8]}\n{virtual_ip}",
+                            'virtual_ip': virtual_ip,
+                            'is_self': False,
+                            'type': 'direct' if peer.is_alive() else 'stale',
+                            'latency_ms': 0,
+                            'hop_count': 1
+                        })
+
+                        # Add edge from us to this peer
+                        edges.append({
+                            'from': self.node_id.hex(),
+                            'to': node_hex,
+                            'type': 'direct' if peer.is_alive() else 'stale',
+                            'latency_ms': 0
+                        })
+                except Exception as e:
+                    logger.debug(f"Error getting DHT peers for topology: {e}")
+
+            direct_count = sum(1 for e in edges if e.get('type') == 'direct')
+            relay_count = sum(1 for e in edges if e.get('type') in ('relay', 'stale'))
+
             return {
                 'self_id': self.node_id.hex(),
                 'self_ip': self.tun.local_ip,
                 'nodes': nodes,
                 'edges': edges,
-                'total_neighbors': len(self._neighbors),
-                'direct_connections': sum(1 for r in self._routes.values() if r.is_direct),
-                'relay_connections': sum(1 for r in self._routes.values() if not r.is_direct)
+                'total_neighbors': len(nodes) - 1,
+                'direct_connections': direct_count,
+                'relay_connections': relay_count
             }
 
     def on_malachi_packet(self, src_node_id: bytes, payload: bytes):

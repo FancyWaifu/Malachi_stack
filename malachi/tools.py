@@ -1141,6 +1141,247 @@ def cmd_mesh(args):
         print(f"malmesh: error: {e}")
 
 
+def cmd_connect(args):
+    """Connect to a peer by IP address."""
+    import socket
+    import struct
+
+    try:
+        from .crypto import load_or_create_ed25519, generate_node_id
+        from .mesh import MeshNode, PeerInfo, MeshMsgType
+
+        # Parse address
+        addr = args.address
+        if ':' in addr:
+            host, port = addr.rsplit(':', 1)
+            port = int(port)
+        else:
+            host = addr
+            port = 7891
+
+        # Load our identity
+        sk, vk = load_or_create_ed25519()
+        our_node_id = generate_node_id(bytes(vk))
+
+        print(f"MALACHI PEER CONNECTION")
+        print("=" * 50)
+        print(f"Your Node ID: {our_node_id.hex()[:16]}...")
+        print(f"Connecting to: {host}:{port}")
+        print()
+
+        # Create UDP socket and send ping
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(3.0)
+        sock.bind(('', 0))
+        local_port = sock.getsockname()[1]
+
+        # Send PING message: type (1 byte) + our node_id (16 bytes)
+        ping = struct.pack(">B16s", MeshMsgType.PING, our_node_id)
+
+        print(f"Sending ping from port {local_port}...")
+        sock.sendto(ping, (host, port))
+
+        try:
+            data, addr = sock.recvfrom(1024)
+            if len(data) >= 17 and data[0] == MeshMsgType.PONG:
+                peer_id = data[1:17]
+                print(f"Connected! Peer Node ID: {peer_id.hex()[:16]}...")
+                print()
+                print("Peer added successfully.")
+                print(f"  Peer ID:  {peer_id.hex()}")
+                print(f"  Address:  {host}:{port}")
+
+                # Save to peers file
+                peers_file = os.path.expanduser("~/.ministack/peers.json")
+                peers = {"peers": []}
+                if os.path.exists(peers_file):
+                    try:
+                        with open(peers_file) as f:
+                            peers = json.load(f)
+                    except:
+                        pass
+
+                # Add peer
+                peer_entry = {
+                    "node_id": peer_id.hex(),
+                    "address": [host, port],
+                    "added": time.time()
+                }
+
+                # Check if already exists
+                existing = False
+                for p in peers.get("peers", []):
+                    if p.get("node_id") == peer_id.hex():
+                        existing = True
+                        break
+
+                if not existing:
+                    peers.setdefault("peers", []).append(peer_entry)
+                    os.makedirs(os.path.dirname(peers_file), exist_ok=True)
+                    with open(peers_file, 'w') as f:
+                        json.dump(peers, f, indent=2)
+                    print(f"  Saved to: {peers_file}")
+                else:
+                    print("  (Peer already saved)")
+
+            else:
+                print(f"Unexpected response: {data[:20].hex() if data else 'empty'}")
+        except socket.timeout:
+            print("No response - peer may be offline or firewalled")
+            print()
+            print("Troubleshooting:")
+            print(f"  1. Ensure daemon is running on {host}")
+            print(f"  2. Check firewall allows UDP port {port}")
+            print(f"  3. Verify both devices are on same network")
+        finally:
+            sock.close()
+
+    except Exception as e:
+        print(f"connect: error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def cmd_discover(args):
+    """Discover Malachi nodes on the local network."""
+    import socket
+    import struct
+
+    try:
+        from .crypto import load_or_create_ed25519, generate_node_id
+        from .mesh import MeshMsgType
+
+        sk, vk = load_or_create_ed25519()
+        our_node_id = generate_node_id(bytes(vk))
+
+        print("MALACHI LAN DISCOVERY")
+        print("=" * 50)
+        print(f"Your Node ID: {our_node_id.hex()[:16]}...")
+        print()
+
+        # Get local network info
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(0.5)
+        sock.bind(('', 0))
+        local_port = sock.getsockname()[1]
+
+        # Build ping message
+        ping = struct.pack(">B16s", MeshMsgType.PING, our_node_id)
+
+        # Get broadcast addresses to try
+        broadcast_addrs = ['255.255.255.255']
+
+        # Try to get local subnet broadcast
+        try:
+            import subprocess
+            if sys.platform == 'darwin':
+                result = subprocess.run(['ifconfig'], capture_output=True, text=True)
+                for line in result.stdout.split('\n'):
+                    if 'broadcast' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'broadcast' and i+1 < len(parts):
+                                broadcast_addrs.append(parts[i+1])
+            else:
+                result = subprocess.run(['ip', 'addr'], capture_output=True, text=True)
+                for line in result.stdout.split('\n'):
+                    if 'brd' in line and 'inet ' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'brd' and i+1 < len(parts):
+                                broadcast_addrs.append(parts[i+1])
+        except:
+            pass
+
+        # Remove duplicates
+        broadcast_addrs = list(set(broadcast_addrs))
+
+        port = args.port if hasattr(args, 'port') and args.port else 7891
+        timeout = args.timeout if hasattr(args, 'timeout') and args.timeout else 3.0
+
+        print(f"Scanning port {port} (timeout: {timeout}s)...")
+        print(f"Broadcast addresses: {', '.join(broadcast_addrs)}")
+        print()
+
+        # Send broadcasts
+        for bcast in broadcast_addrs:
+            try:
+                sock.sendto(ping, (bcast, port))
+            except:
+                pass
+
+        # Also scan common local IPs
+        print("Scanning local subnet...")
+
+        # Get our IP to determine subnet
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test_sock.connect(('8.8.8.8', 80))
+            our_ip = test_sock.getsockname()[0]
+            test_sock.close()
+
+            # Scan /24 subnet
+            subnet = '.'.join(our_ip.split('.')[:3])
+            for i in range(1, 255):
+                target_ip = f"{subnet}.{i}"
+                if target_ip != our_ip:
+                    try:
+                        sock.sendto(ping, (target_ip, port))
+                    except:
+                        pass
+        except:
+            pass
+
+        # Collect responses
+        discovered = []
+        end_time = time.time() + timeout
+
+        while time.time() < end_time:
+            try:
+                data, addr = sock.recvfrom(1024)
+                if len(data) >= 17 and data[0] == MeshMsgType.PONG:
+                    peer_id = data[1:17]
+                    if peer_id != our_node_id:
+                        discovered.append({
+                            'node_id': peer_id,
+                            'address': addr
+                        })
+                        print(f"  Found: {addr[0]}:{addr[1]} - {peer_id.hex()[:16]}...")
+            except socket.timeout:
+                continue
+            except:
+                break
+
+        sock.close()
+
+        print()
+        if discovered:
+            print(f"Discovered {len(discovered)} node(s):")
+            print()
+            for peer in discovered:
+                print(f"  Node ID: {peer['node_id'].hex()}")
+                print(f"  Address: {peer['address'][0]}:{peer['address'][1]}")
+                print(f"  Connect: python3 -m malachi.tools connect {peer['address'][0]}:{peer['address'][1]}")
+                print()
+        else:
+            print("No nodes discovered.")
+            print()
+            print("Make sure:")
+            print("  1. Malachi daemon is running on other devices")
+            print("  2. Devices are on the same network")
+            print(f"  3. UDP port {port} is not blocked by firewall")
+            print()
+            print("To manually connect, use:")
+            print("  python3 -m malachi.tools connect <ip>:7891")
+
+    except Exception as e:
+        print(f"discover: error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1232,6 +1473,17 @@ def main():
     mesh_parser.add_argument("action", nargs="?", choices=["status", "join", "info"], default="status")
     mesh_parser.add_argument("-b", "--bootstrap", help="Bootstrap node address")
     mesh_parser.set_defaults(func=cmd_mesh)
+
+    # Connect command
+    connect_parser = subparsers.add_parser("connect", help="Connect to a peer by IP address")
+    connect_parser.add_argument("address", help="Peer address (IP:port or IP)")
+    connect_parser.set_defaults(func=cmd_connect)
+
+    # Discover command
+    discover_parser = subparsers.add_parser("discover", help="Discover Malachi nodes on local network")
+    discover_parser.add_argument("-p", "--port", type=int, default=7891, help="Port to scan (default: 7891)")
+    discover_parser.add_argument("-t", "--timeout", type=float, default=3.0, help="Discovery timeout in seconds")
+    discover_parser.set_defaults(func=cmd_discover)
 
     # Parse and execute
     args = parser.parse_args()

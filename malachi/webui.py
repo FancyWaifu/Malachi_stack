@@ -1950,17 +1950,109 @@ class MalachiWebUI(BaseHTTPRequestHandler):
     def _api_ndp_discover(self):
         """API: Broadcast NDP discovery."""
         if MalachiWebUI.daemon and MalachiWebUI.daemon._running:
-            # If daemon is running, we can trigger discovery
             try:
-                # Get current neighbor count
-                neighbors_before = len(MalachiWebUI.daemon.get_neighbors())
+                import socket
+                import struct
 
-                self._send_json({
-                    'success': True,
-                    'message': f'Discovery broadcast sent\nCurrent neighbors: {neighbors_before}\n\nNew neighbors will appear in the dashboard.'
-                })
+                mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None)
+                peers_before = 0
+                if mesh_node:
+                    peers_before = len(mesh_node.dht.get_all_peers())
+
+                # Perform actual broadcast discovery
+                discovered = []
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.settimeout(0.3)
+                sock.bind(('', 0))
+
+                # PING message
+                ping = struct.pack('>B16s', 0x01, MalachiWebUI.daemon.node_id)
+
+                # Get broadcast addresses
+                broadcast_addrs = ['255.255.255.255']
+                try:
+                    import subprocess
+                    result = subprocess.run(['ifconfig'], capture_output=True, text=True)
+                    for line in result.stdout.split('\n'):
+                        if 'broadcast' in line:
+                            parts = line.split()
+                            for i, p in enumerate(parts):
+                                if p == 'broadcast' and i+1 < len(parts):
+                                    broadcast_addrs.append(parts[i+1])
+                except:
+                    pass
+
+                # Send broadcasts
+                for bcast in set(broadcast_addrs):
+                    try:
+                        sock.sendto(ping, (bcast, 7891))
+                    except:
+                        pass
+
+                # Also scan local subnet
+                try:
+                    test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    test_sock.connect(('8.8.8.8', 80))
+                    our_ip = test_sock.getsockname()[0]
+                    test_sock.close()
+
+                    subnet = '.'.join(our_ip.split('.')[:3])
+                    for i in range(1, 255):
+                        target = f"{subnet}.{i}"
+                        if target != our_ip:
+                            try:
+                                sock.sendto(ping, (target, 7891))
+                            except:
+                                pass
+                except:
+                    pass
+
+                # Collect responses
+                import time
+                end_time = time.time() + 2.0
+                while time.time() < end_time:
+                    try:
+                        data, addr = sock.recvfrom(1024)
+                        if len(data) >= 17 and data[0] == 0x02:  # PONG
+                            peer_id = data[1:17]
+                            if peer_id != MalachiWebUI.daemon.node_id:
+                                discovered.append({
+                                    'node_id': peer_id.hex(),
+                                    'address': addr
+                                })
+                                # Add to mesh node DHT
+                                if mesh_node:
+                                    from .mesh import PeerInfo
+                                    peer = PeerInfo(node_id=peer_id, address=addr)
+                                    mesh_node.dht.add_peer(peer)
+                    except socket.timeout:
+                        continue
+                    except:
+                        break
+
+                sock.close()
+
+                peers_after = 0
+                if mesh_node:
+                    peers_after = len(mesh_node.dht.get_all_peers())
+
+                if discovered:
+                    msg = f'Discovery complete!\n\nFound {len(discovered)} node(s):\n'
+                    for d in discovered[:10]:
+                        msg += f'  {d["address"][0]}:{d["address"][1]} - {d["node_id"][:16]}...\n'
+                    msg += f'\nDHT peers: {peers_before} -> {peers_after}'
+                    self._send_json({'success': True, 'message': msg})
+                else:
+                    self._send_json({
+                        'success': True,
+                        'message': f'Discovery broadcast sent.\nNo new nodes found.\nCurrent DHT peers: {peers_after}'
+                    })
+
             except Exception as e:
-                self._send_json({'success': False, 'message': f'Discovery failed: {e}'})
+                import traceback
+                self._send_json({'success': False, 'message': f'Discovery failed: {e}\n{traceback.format_exc()}'})
         else:
             self._send_json({
                 'success': False,
