@@ -1735,7 +1735,7 @@ DASHBOARD_CONTENT = '''
                 </tr>
                 <tr>
                     <td class="text-muted">DNS Name</td>
-                    <td><code class="mono">{{NODE_ID_SHORT}}.mli</code></td>
+                    <td><code class="mono">{{DNS_NAME}}</code></td>
                 </tr>
                 <tr>
                     <td class="text-muted">Platform</td>
@@ -2369,6 +2369,8 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             route_table = '<p class="text-muted">No routes established. Start daemon and discover neighbors.</p>'
 
         content = DASHBOARD_CONTENT
+        # DNS name is first 8 chars of node ID (short, memorable)
+        dns_name = info['node_id'][:8] + '.mli'
         replacements = {
             'DAEMON_STATUS': 'Running' if info['running'] else 'Stopped',
             'PLATFORM': sanitize_html(PLATFORM.title()),
@@ -2377,6 +2379,7 @@ class MalachiWebUI(BaseHTTPRequestHandler):
             'NODE_ID': sanitize_html(info['node_id']),
             'NODE_ID_SHORT': sanitize_html(info['node_id_short']),
             'VIRTUAL_IP': sanitize_html(info['virtual_ip']),
+            'DNS_NAME': sanitize_html(dns_name),
             'ROUTE_TABLE': route_table,
             'TOPOLOGY_JSON': json.dumps(topology),
             'PACKETS_IN': str(packets_in),
