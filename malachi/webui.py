@@ -2458,11 +2458,23 @@ class MalachiWebUI(BaseHTTPRequestHandler):
         info = self._get_node_info()
         mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None) if MalachiWebUI.daemon else None
 
+        # Count peers from both daemon neighbors and mesh DHT
+        neighbor_count = 0
+        dht_peer_count = 0
+        if MalachiWebUI.daemon:
+            neighbor_count = len(MalachiWebUI.daemon.get_neighbors())
+        if mesh_node:
+            dht_peer_count = len(mesh_node.dht.get_all_peers())
+
+        # Use the larger of the two counts (they may overlap)
+        total_peers = max(neighbor_count, dht_peer_count)
+
         data = {
             'daemon_running': info['running'],
             'node_id': info['node_id'],
             'virtual_ip': info['virtual_ip'],
-            'neighbors': len(MalachiWebUI.daemon.get_neighbors()) if MalachiWebUI.daemon else 0,
+            'neighbors': total_peers,
+            'dht_peers': dht_peer_count,
             'packets_in': 0,
             'packets_out': 0,
             'history': stats_history.to_dict(),
@@ -2680,16 +2692,40 @@ class MalachiWebUI(BaseHTTPRequestHandler):
                     if len(data) >= 17 and data[0] == 0x02:
                         peer_id = data[1:17]
                         if peer_id != MalachiWebUI.daemon.node_id:
-                            discovered.append({'id': peer_id.hex()[:16], 'addr': addr[0]})
+                            discovered.append({
+                                'id': peer_id,
+                                'id_hex': peer_id.hex()[:16],
+                                'addr': addr[0],
+                                'port': 7891
+                            })
                 except socket.timeout:
                     continue
 
             sock.close()
 
+            # Add discovered peers to the mesh node's DHT
+            added_count = 0
+            mesh_node = getattr(MalachiWebUI.daemon, 'mesh_node', None)
+            if mesh_node and discovered:
+                try:
+                    from .mesh import PeerInfo
+                    for d in discovered:
+                        peer = PeerInfo(
+                            node_id=d['id'],
+                            address=(d['addr'], d['port'])
+                        )
+                        if mesh_node.dht.add_peer(peer):
+                            added_count += 1
+                            MalachiWebUI.log_buffer.append(
+                                f"[NDP] Added peer: {d['id_hex']}... @ {d['addr']}:{d['port']}"
+                            )
+                except Exception as e:
+                    MalachiWebUI.log_buffer.append(f"[NDP] Error adding peers: {e}")
+
             if discovered:
-                msg = f'Found {len(discovered)} node(s):\n'
+                msg = f'Found {len(discovered)} node(s), added {added_count} to DHT:\n'
                 for d in discovered[:10]:
-                    msg += f'  {d["addr"]} - {d["id"]}...\n'
+                    msg += f'  {d["addr"]}:{d["port"]} - {d["id_hex"]}...\n'
                 self._send_json({'success': True, 'message': msg})
             else:
                 self._send_json({'success': True, 'message': 'Broadcast sent. No new nodes found.'})
