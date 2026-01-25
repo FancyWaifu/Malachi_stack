@@ -315,6 +315,29 @@ class AdhocConfigurator:
         freq = 2412 + (channel - 1) * 5  # Calculate frequency
 
         try:
+            # Check and unblock RF-kill if needed
+            print("  Checking RF-kill status...")
+            result = subprocess.run(
+                ['rfkill', 'list', 'wifi'],
+                capture_output=True, text=True, timeout=10
+            )
+            if 'Soft blocked: yes' in result.stdout or 'Hard blocked: yes' in result.stdout:
+                print("  Unblocking WiFi radio...")
+                subprocess.run(
+                    ['sudo', 'rfkill', 'unblock', 'wifi'],
+                    check=False, timeout=10
+                )
+                time.sleep(1)
+
+                # Check if still blocked (hardware switch)
+                result = subprocess.run(
+                    ['rfkill', 'list', 'wifi'],
+                    capture_output=True, text=True, timeout=10
+                )
+                if 'Hard blocked: yes' in result.stdout:
+                    print("  ERROR: WiFi is hardware-blocked. Check your laptop's WiFi switch.")
+                    return False
+
             # Stop NetworkManager for this interface (if running)
             print("  Stopping NetworkManager control...")
             subprocess.run(
