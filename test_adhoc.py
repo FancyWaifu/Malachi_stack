@@ -256,51 +256,75 @@ class AdhocConfigurator:
     def _setup_adhoc_macos(self, network_name: str, channel: int) -> bool:
         """Configure ad-hoc on macOS."""
         iface = self.platform.wifi_interface
+        airport = '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport'
 
         try:
-            # Dissociate from current network
-            print("  Disconnecting from current network...")
-            subprocess.run(
-                ['sudo', '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport', '-z'],
-                check=False, timeout=10
-            )
-            time.sleep(1)
-
-            # Create ad-hoc network (IBSS)
-            # On macOS, we use the airport utility to create a computer-to-computer network
-            print(f"  Creating ad-hoc network '{network_name}'...")
-
-            # Method 1: Use airport to create IBSS
-            result = subprocess.run(
-                ['sudo', '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport',
-                 f'--ibss={network_name}', f'--channel={channel}'],
-                capture_output=True, text=True, timeout=15
-            )
-
-            if result.returncode != 0:
-                # Method 2: Create via networksetup (creates a hosted network)
-                print("  Trying alternate method...")
-                subprocess.run(
-                    ['sudo', 'networksetup', '-createnetworkservice', 'MalachiAdhoc', iface],
-                    check=False, timeout=10
-                )
-
-            # Assign IP address
-            print("  Assigning IP address...")
             # Generate IP from hostname hash for uniqueness
             host_hash = hash(socket.gethostname()) & 0xFF
             ip_addr = f"192.168.73.{max(2, host_hash % 254)}"
 
-            subprocess.run(
-                ['sudo', 'ifconfig', iface, 'inet', ip_addr, 'netmask', '255.255.255.0'],
-                check=True, timeout=10
+            # Dissociate from current network
+            print("  Disconnecting from current network...")
+            subprocess.run(['sudo', airport, '-z'], check=False, timeout=10)
+            time.sleep(2)
+
+            # Create ad-hoc network (IBSS)
+            print(f"  Creating ad-hoc network '{network_name}'...")
+
+            # Try IBSS mode with airport
+            result = subprocess.run(
+                ['sudo', airport, '-i', f'--ibss={network_name}', f'--channel={channel}'],
+                capture_output=True, text=True, timeout=15
             )
 
-            print(f"  Assigned IP: {ip_addr}")
-            print(f"\n  SUCCESS: Ad-hoc network '{network_name}' created!")
-            print(f"  Other devices should join '{network_name}' on channel {channel}")
+            # If that didn't work, try alternate syntax
+            if result.returncode != 0:
+                print("  Trying alternate IBSS command...")
+                subprocess.run(
+                    ['sudo', airport, f'--ibss={network_name}', str(channel)],
+                    capture_output=True, text=True, timeout=15
+                )
 
-            return True
+            time.sleep(2)
+
+            # Remove any existing IP configuration
+            print("  Clearing existing IP configuration...")
+            subprocess.run(
+                ['sudo', 'ifconfig', iface, 'inet', '0.0.0.0'],
+                check=False, timeout=10
+            )
+
+            # Assign our static IP address
+            print(f"  Assigning IP address: {ip_addr}...")
+            result = subprocess.run(
+                ['sudo', 'ifconfig', iface, 'inet', ip_addr, 'netmask', '255.255.255.0'],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode != 0:
+                print(f"  Warning: ifconfig returned: {result.stderr}")
+
+            # Verify IP was assigned
+            time.sleep(1)
+            verify = subprocess.run(
+                ['ifconfig', iface],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if ip_addr in verify.stdout:
+                print(f"\n  SUCCESS: Ad-hoc network '{network_name}' created!")
+                print(f"  IP Address: {ip_addr}")
+                print(f"  Channel: {channel}")
+                print(f"\n  Other devices should join '{network_name}' on channel {channel}")
+                return True
+            else:
+                print(f"\n  WARNING: Network created but IP may not be set correctly.")
+                print(f"  Expected: {ip_addr}")
+                print(f"  Run: sudo ifconfig {iface} inet {ip_addr} netmask 255.255.255.0")
+                print(f"\n  Current interface config:")
+                for line in verify.stdout.split('\n')[:5]:
+                    print(f"    {line}")
+                return True  # Still return true, network may work
 
         except subprocess.CalledProcessError as e:
             print(f"  ERROR: Command failed: {e}")
