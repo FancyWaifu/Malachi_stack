@@ -1332,10 +1332,6 @@ EXAMPLES:
     # Start the daemon (required for networking)
     {run_cmd}
 
-    # Start daemon with Web UI
-    {run_cmd} --webui
-    # Then open http://localhost:7890 in your browser
-
     # Ping by virtual IP
     python3 -m malachi.tun_interface ping 10.144.45.23
 
@@ -1526,7 +1522,7 @@ class MalachiSocket:
         self.close()
 
 
-def malctl_start(with_webui: bool = False, webui_port: int = 7890):
+def malctl_start():
     """Start the Malachi network daemon."""
     import signal
 
@@ -1568,9 +1564,6 @@ def malctl_start(with_webui: bool = False, webui_port: int = 7890):
     # Create and start daemon
     daemon = MalachiNetworkDaemon(physical_iface, node_id, signing_key)
 
-    # Web UI thread
-    webui_thread = None
-
     def signal_handler(sig, frame):
         print("\nShutting down...")
         daemon.stop()
@@ -1583,43 +1576,11 @@ def malctl_start(with_webui: bool = False, webui_port: int = 7890):
         daemon.start()
         daemon.print_status()
 
-        # Start Web UI if requested
-        if with_webui:
-            try:
-                from .webui import MalachiWebUI, run_webui
-                import threading
-                from http.server import HTTPServer
-
-                # Connect Web UI to daemon
-                MalachiWebUI.daemon = daemon
-
-                def start_webui():
-                    server = HTTPServer(("0.0.0.0", webui_port), MalachiWebUI)
-                    server.serve_forever()
-
-                webui_thread = threading.Thread(target=start_webui, daemon=True)
-                webui_thread.start()
-                print(f"\nWeb UI available at: http://localhost:{webui_port}")
-            except ImportError as e:
-                print(f"Warning: Could not start Web UI: {e}")
-
         print("\nDaemon running. Press Ctrl+C to stop.")
-        if with_webui:
-            print("Or use the Stop button in the Web UI.")
 
-        # Keep running, but check for shutdown signal from Web UI
+        # Keep running
         while True:
             time.sleep(1)
-
-            # Check if Web UI requested shutdown
-            if with_webui:
-                try:
-                    from .webui import MalachiWebUI
-                    if MalachiWebUI.shutdown_requested:
-                        print("\nShutdown requested from Web UI...")
-                        break
-                except:
-                    pass
 
     except RuntimeError as e:
         print(f"Error: {e}")
@@ -1652,17 +1613,7 @@ if __name__ == "__main__":
     elif cmd == "platform":
         malctl_platform()
     elif cmd == "start":
-        # Check for --webui flag
-        with_webui = "--webui" in sys.argv or "-w" in sys.argv
-        webui_port = 7890
-        # Check for --webui-port
-        for i, arg in enumerate(sys.argv):
-            if arg in ("--webui-port", "-wp") and i + 1 < len(sys.argv):
-                try:
-                    webui_port = int(sys.argv[i + 1])
-                except:
-                    pass
-        malctl_start(with_webui=with_webui, webui_port=webui_port)
+        malctl_start()
     elif cmd in ("help", "-h", "--help"):
         malctl_help()
 

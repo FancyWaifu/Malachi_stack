@@ -13,7 +13,6 @@ Malachi provides a complete networking stack with automatic peer discovery, end-
 - **Cross-Platform** - Linux, macOS, and BSD support
 - **Network Tools** - ping, traceroute, scan, netcat, and more
 - **DNS Resolution** - Access nodes via `http://a1b2c3d4.mli/` URLs
-- **Web UI** - Browser-based control panel for configuration
 - **TOFU Pinning** - Trust-On-First-Use key pinning for peer verification
 - **Optional PSK Binding** - Pre-shared key authentication for enhanced security
 - **Interactive TUI** - Curses-based shell for network operations
@@ -25,7 +24,6 @@ Malachi provides a complete networking stack with automatic peer discovery, end-
 - [TUN Interface](#tun-interface)
 - [Network Tools](#network-tools)
 - [DNS Resolution (.mli)](#dns-resolution-mli)
-- [Web UI](#web-ui)
 - [Python API](#python-api)
 - [Interactive Shell](#interactive-shell)
 - [Architecture](#architecture)
@@ -419,52 +417,6 @@ dig @127.0.0.1 a1b2c3d4.mli
 
 ---
 
-## Web UI
-
-A browser-based control panel for configuring and monitoring Malachi.
-
-### Start the Web UI
-
-```bash
-python3 -m malachi.webui
-```
-
-Then open: **http://localhost:7890**
-
-### Features
-
-| Tab | Description |
-|-----|-------------|
-| **Dashboard** | Node identity, daemon status, neighbor list |
-| **Tools** | Ping, lookup, and scan with live output |
-| **Config** | Interface selection, DNS setup, identity management |
-| **Logs** | Real-time log viewer |
-
-### Screenshots
-
-**Dashboard:**
-- View your Node ID and Virtual IP
-- See discovered neighbors
-- Start/stop daemon
-- Broadcast discovery
-
-**Tools:**
-- Ping nodes by ID or IP
-- Look up address mappings
-- Scan network for nodes
-
-### Custom Port
-
-```bash
-# Run on different port
-python3 -m malachi.webui --port 8080
-
-# Bind to specific interface
-python3 -m malachi.webui --host 192.168.1.100 --port 8080
-```
-
----
-
 ## Python API
 
 ### High-Level: Socket API
@@ -628,7 +580,6 @@ malachi/
 ├── tun_interface.py  # OS TUN integration
 ├── tools.py          # Network utilities (ping, trace, etc.)
 ├── dns.py            # DNS resolver for .mli domains
-├── webui.py          # Browser-based control panel
 └── tui.py            # Interactive shell
 ```
 
