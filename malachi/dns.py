@@ -3,7 +3,7 @@
 Malachi DNS Resolver
 
 Resolves .mli domains to Malachi virtual IPs:
-    http://a1b2c3d4.mli:8080/  →  10.144.195.212
+    http://a1b2c3d4.mli:8080/  →  10.161.195.212
 
 Usage:
     sudo python3 -m malachi.dns start
@@ -68,15 +68,16 @@ def node_id_to_virtual_ip(node_id_hex: str) -> Optional[str]:
     except ValueError:
         return None
 
-    # Same algorithm as tun_interface.py
+    # Same algorithm as tun_interface.py (uses 3 bytes for 10.x.x.x range)
     node_hash = int.from_bytes(node_id[:4], 'big')
+    second_octet = (node_hash >> 16) & 0xFF
     third_octet = (node_hash >> 8) & 0xFF
     fourth_octet = node_hash & 0xFF
 
-    if fourth_octet < 2:
+    if second_octet == 0 and third_octet == 0 and fourth_octet < 2:
         fourth_octet = 2
 
-    return f"10.144.{third_octet}.{fourth_octet}"
+    return f"10.{second_octet}.{third_octet}.{fourth_octet}"
 
 
 def parse_dns_header(data: bytes) -> DNSHeader:
@@ -218,9 +219,9 @@ class MalachiDNSServer:
     DNS server that resolves .mli domains to Malachi virtual IPs.
 
     Examples:
-        a1b2c3d4.mli        → 10.144.195.212
-        a1b2c3d4e5f6.mli    → 10.144.195.212 (same, uses first 4 bytes)
-        mynode.a1b2c3d4.mli → 10.144.195.212 (subdomain ignored)
+        a1b2c3d4.mli        → 10.161.195.212
+        a1b2c3d4e5f6.mli    → 10.161.195.212 (same, uses first 4 bytes)
+        mynode.a1b2c3d4.mli → 10.161.195.212 (subdomain ignored)
     """
 
     def __init__(
@@ -411,7 +412,7 @@ def configure_system_dns(dns_ip: str = "127.0.0.1"):
         logger.info("Linux DNS configuration options:")
         logger.info("")
         logger.info("Option 1: Add to /etc/hosts for specific nodes:")
-        logger.info("  echo '10.144.195.212 mynode.mli' | sudo tee -a /etc/hosts")
+        logger.info("  echo '10.161.195.212 mynode.mli' | sudo tee -a /etc/hosts")
         logger.info("")
         logger.info("Option 2: Use dnsmasq for *.mli:")
         logger.info("  echo 'server=/mli/127.0.0.1' | sudo tee /etc/dnsmasq.d/malachi.conf")
@@ -462,9 +463,9 @@ TLD:        .{MALACHI_TLD}
 Example:    http://a1b2c3d4.{MALACHI_TLD}:8080/
 
 Resolution:
-  a1b2c3d4.{MALACHI_TLD}           → 10.144.195.212
-  www.a1b2c3d4.{MALACHI_TLD}       → 10.144.195.212
-  a1b2c3d4e5f67890.{MALACHI_TLD}   → 10.144.195.212
+  a1b2c3d4.{MALACHI_TLD}           → 10.161.195.212
+  www.a1b2c3d4.{MALACHI_TLD}       → 10.161.195.212
+  a1b2c3d4e5f67890.{MALACHI_TLD}   → 10.161.195.212
 
 Platform: {system}
 """)

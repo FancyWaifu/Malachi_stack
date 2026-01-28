@@ -63,17 +63,17 @@ class TestNodeMapping(unittest.TestCase):
     def test_create_mapping(self):
         """Create a node mapping."""
         node_id = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
-        mapping = NodeMapping(node_id=node_id, virtual_ip="10.144.1.2")
+        mapping = NodeMapping(node_id=node_id, virtual_ip="10.1.2.3")
 
         self.assertEqual(mapping.node_id, node_id)
-        self.assertEqual(mapping.virtual_ip, "10.144.1.2")
+        self.assertEqual(mapping.virtual_ip, "10.1.2.3")
         self.assertFalse(mapping.is_local)
         self.assertIsInstance(mapping.last_seen, float)
 
     def test_local_mapping(self):
         """Create a local node mapping."""
         node_id = b'\x01' * 16
-        mapping = NodeMapping(node_id=node_id, virtual_ip="10.144.0.1", is_local=True)
+        mapping = NodeMapping(node_id=node_id, virtual_ip="10.0.0.1", is_local=True)
 
         self.assertTrue(mapping.is_local)
 
@@ -95,7 +95,7 @@ class TestNodeIdToVirtualIp(unittest.TestCase):
         node_id = bytes.fromhex("a1b2c3d4e5f67890abcdef1234567890")
         ip = node_id_to_virtual_ip(node_id)
 
-        self.assertTrue(ip.startswith("10.144."))
+        self.assertTrue(ip.startswith("10."))
         parts = ip.split('.')
         self.assertEqual(len(parts), 4)
         for part in parts:
@@ -103,11 +103,11 @@ class TestNodeIdToVirtualIp(unittest.TestCase):
 
     def test_conversion_known_value(self):
         """Test a known conversion."""
-        # a1b2c3d4 -> third_octet = 0xc3 = 195, fourth_octet = 0xd4 = 212
+        # a1b2c3d4 -> second_octet = 0xb2 = 178, third_octet = 0xc3 = 195, fourth_octet = 0xd4 = 212
         node_id = bytes.fromhex("a1b2c3d4e5f67890abcdef1234567890")
         ip = node_id_to_virtual_ip(node_id)
 
-        self.assertEqual(ip, "10.144.195.212")
+        self.assertEqual(ip, "10.178.195.212")
 
     def test_conversion_avoids_reserved(self):
         """Fourth octet should be >= 2 (avoiding .0 and .1)."""
@@ -134,10 +134,10 @@ class TestParseNodeAddress(unittest.TestCase):
 
     def test_parse_virtual_ip(self):
         """Parse a virtual IP address."""
-        node_id, vip = parse_node_address("10.144.45.23")
+        node_id, vip = parse_node_address("10.45.23.100")
 
         self.assertIsNone(node_id)
-        self.assertEqual(vip, "10.144.45.23")
+        self.assertEqual(vip, "10.45.23.100")
 
     def test_parse_full_node_id(self):
         """Parse a full 32-char node ID."""
@@ -268,8 +268,8 @@ class TestTunInterfaceBase(unittest.TestCase):
 
     def test_initial_state(self):
         """Check initial state."""
-        # Local IP is derived from node ID: a1b2c3d4 -> 10.144.195.212
-        self.assertEqual(self.tun.local_ip, "10.144.195.212")
+        # Local IP is derived from node ID: a1b2c3d4 -> 10.178.195.212
+        self.assertEqual(self.tun.local_ip, "10.178.195.212")
         self.assertFalse(self.tun._running)
         self.assertIsNone(self.tun.tun_fd)
 
@@ -278,7 +278,7 @@ class TestTunInterfaceBase(unittest.TestCase):
         other_node = bytes.fromhex("11223344556677889900aabbccddeeff")
         ip = self.tun.allocate_ip(other_node)
 
-        self.assertTrue(ip.startswith("10.144."))
+        self.assertTrue(ip.startswith("10."))
         self.assertNotEqual(ip, self.tun.local_ip)  # Not our local IP
 
     def test_allocate_ip_same_node_twice(self):
@@ -300,7 +300,7 @@ class TestTunInterfaceBase(unittest.TestCase):
 
     def test_get_node_id_unknown(self):
         """Unknown IP returns None."""
-        retrieved = self.tun.get_node_id("10.144.99.99")
+        retrieved = self.tun.get_node_id("10.99.99.99")
         self.assertIsNone(retrieved)
 
     def test_get_virtual_ip(self):
@@ -342,7 +342,7 @@ class TestTunInterfaceBase(unittest.TestCase):
         for i in range(100):
             node = bytes([i] * 16)
             ip = self.tun.allocate_ip(node)
-            self.assertTrue(ip.startswith("10.144."))
+            self.assertTrue(ip.startswith("10."))
 
         # All should have unique IPs
         all_ips = set(self.tun._reverse_mappings.values())
@@ -403,7 +403,7 @@ class TestMalachiPing(unittest.TestCase):
     def test_ping_by_virtual_ip(self):
         """Ping using virtual IP."""
         ping = MalachiPing()
-        stats = ping.ping("10.144.45.23", count=2, quiet=True)
+        stats = ping.ping("10.45.23.100", count=2, quiet=True)
 
         self.assertEqual(stats.transmitted, 2)
         self.assertEqual(stats.received, 2)
@@ -429,7 +429,7 @@ class TestMalachiTrace(unittest.TestCase):
     def test_trace_by_virtual_ip(self):
         """Trace using virtual IP."""
         trace = MalachiTrace()
-        hops = trace.trace("10.144.45.23", max_hops=3, quiet=True)
+        hops = trace.trace("10.45.23.100", max_hops=3, quiet=True)
 
         self.assertGreater(len(hops), 0)
         self.assertLessEqual(len(hops), 3)
@@ -444,7 +444,7 @@ class TestMalachiTrace(unittest.TestCase):
     def test_trace_hop_structure(self):
         """Trace hops have correct structure."""
         trace = MalachiTrace()
-        hops = trace.trace("10.144.45.23", max_hops=2, queries=2, quiet=True)
+        hops = trace.trace("10.45.23.100", max_hops=2, queries=2, quiet=True)
 
         for hop in hops:
             self.assertIsInstance(hop, TraceHop)
@@ -462,15 +462,15 @@ class TestMalachiLookup(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result['node_id'], "a1b2c3d4e5f67890abcdef1234567890")
-        self.assertEqual(result['virtual_ip'], "10.144.195.212")
+        self.assertEqual(result['virtual_ip'], "10.178.195.212")
 
     def test_lookup_virtual_ip(self):
         """Look up virtual IP."""
         lookup = MalachiLookup()
-        result = lookup.lookup("10.144.45.23")
+        result = lookup.lookup("10.45.23.100")
 
         self.assertIsNotNone(result)
-        self.assertEqual(result['virtual_ip'], "10.144.45.23")
+        self.assertEqual(result['virtual_ip'], "10.45.23.100")
 
     def test_lookup_short_id(self):
         """Look up short node ID."""
@@ -574,7 +574,7 @@ class TestMalachiSocket(unittest.TestCase):
 
         daemon = MockDaemon()
         sock = MalachiSocket(daemon)
-        sock.connect(("10.144.45.23", 8080))
+        sock.connect(("10.45.23.100", 8080))
 
         self.assertTrue(sock._connected)
 
@@ -623,13 +623,13 @@ class TestNetworkConstants(unittest.TestCase):
 
     def test_malachi_network(self):
         """MALACHI_NETWORK is correct."""
-        self.assertEqual(MALACHI_NETWORK, "10.144.0.0/16")
+        self.assertEqual(MALACHI_NETWORK, "10.0.0.0/8")
 
     def test_malachi_prefix(self):
         """MALACHI_PREFIX is valid."""
         import ipaddress
         self.assertIsInstance(MALACHI_PREFIX, ipaddress.IPv4Network)
-        self.assertEqual(str(MALACHI_PREFIX), "10.144.0.0/16")
+        self.assertEqual(str(MALACHI_PREFIX), "10.0.0.0/8")
 
 
 class TestThreadSafety(unittest.TestCase):

@@ -97,21 +97,21 @@ You'll see:
 Starting Malachi Network Daemon...
 Platform: Darwin
 Created utun interface: utun8
-Configured utun8 with 10.144.0.1/16
+Configured utun8 with 10.0.0.1/8
 Malachi daemon started on utun8
   Platform:   darwin
   Node ID:    a1b2c3d4e5f67890abcdef1234567890
-  Virtual IP: 10.144.0.1
+  Virtual IP: 10.0.0.1
 ```
 
-Now any application can send to `10.144.x.x` addresses:
+Now any application can send to `10.x.x.x` addresses:
 ```bash
 # Ping another Malachi node
-python3 -m malachi.tun_interface ping 10.144.45.23
+python3 -m malachi.tun_interface ping 10.45.23.100
 
 # Or use standard tools (once peers are discovered)
-ping 10.144.45.23
-curl http://10.144.45.23:8080/
+ping 10.45.23.100
+curl http://10.45.23.100:8080/
 ```
 
 ### Option 2: Interactive TUI Shell
@@ -139,17 +139,17 @@ The TUN interface provides OS-level integration, making Malachi transparent to a
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Application                            │
-│              socket.connect(("10.144.45.23", 80))          │
+│              socket.connect(("10.45.23.100", 80))          │
 └───────────────────────┬─────────────────────────────────────┘
                         │ Standard TCP/IP
 ┌───────────────────────▼─────────────────────────────────────┐
 │               mal0 / utun (TUN interface)                   │
-│                    10.144.0.0/16                            │
+│                    10.0.0.0/8                            │
 └───────────────────────┬─────────────────────────────────────┘
                         │ Captured by daemon
 ┌───────────────────────▼─────────────────────────────────────┐
 │                 Malachi Network Daemon                      │
-│         Maps 10.144.x.x ←→ Malachi Node IDs                │
+│         Maps 10.x.x.x ←→ Malachi Node IDs                │
 │         Encrypts with XChaCha20-Poly1305                   │
 │         Handles discovery and key exchange                  │
 └───────────────────────┬─────────────────────────────────────┘
@@ -169,7 +169,7 @@ Node ID:     a1b2c3d4e5f67890abcdef1234567890
              ^^^^^^^^
              First 4 bytes → IP octets
 
-Virtual IP:  10.144.195.212
+Virtual IP:  10.178.195.212
                    ^^^  ^^^
                    0xc3 0xd4
 ```
@@ -214,7 +214,7 @@ Malachi includes familiar network utilities that work with node IDs or virtual I
 
 ```bash
 # Ping by virtual IP
-python3 -m malachi.tun_interface ping 10.144.45.23
+python3 -m malachi.tun_interface ping 10.45.23.100
 
 # Ping by full node ID (32 hex chars)
 python3 -m malachi.tun_interface ping a1b2c3d4e5f67890abcdef1234567890
@@ -223,20 +223,20 @@ python3 -m malachi.tun_interface ping a1b2c3d4e5f67890abcdef1234567890
 python3 -m malachi.tun_interface ping a1b2c3d4
 
 # Continuous ping
-python3 -m malachi.tun_interface ping -c 0 10.144.45.23
+python3 -m malachi.tun_interface ping -c 0 10.45.23.100
 
 # Custom options
-python3 -m malachi.tun_interface ping -c 10 -i 0.5 -s 128 10.144.45.23
+python3 -m malachi.tun_interface ping -c 10 -i 0.5 -s 128 10.45.23.100
 ```
 
 Output:
 ```
-MALPING a1b2c3d4... (10.144.195.212): 64 data bytes
-64 bytes from 10.144.195.212: seq=1 ttl=64 time=6.37ms
-64 bytes from 10.144.195.212: seq=2 ttl=64 time=13.15ms
-64 bytes from 10.144.195.212: seq=3 ttl=64 time=14.30ms
+MALPING a1b2c3d4... (10.178.195.212): 64 data bytes
+64 bytes from 10.178.195.212: seq=1 ttl=64 time=6.37ms
+64 bytes from 10.178.195.212: seq=2 ttl=64 time=13.15ms
+64 bytes from 10.178.195.212: seq=3 ttl=64 time=14.30ms
 
---- a1b2c3d4... (10.144.195.212) malping statistics ---
+--- a1b2c3d4... (10.178.195.212) malping statistics ---
 3 packets transmitted, 3 packets received, 0.0% packet loss
 round-trip min/avg/max = 6.37/11.27/14.30 ms
 ```
@@ -245,18 +245,18 @@ round-trip min/avg/max = 6.37/11.27/14.30 ms
 
 ```bash
 # Trace route to node
-python3 -m malachi.tun_interface trace 10.144.45.23
+python3 -m malachi.tun_interface trace 10.45.23.100
 
 # Limit hops
-python3 -m malachi.tun_interface trace -m 10 10.144.45.23
+python3 -m malachi.tun_interface trace -m 10 10.45.23.100
 ```
 
 Output:
 ```
-maltrace to 10.144.45.23, 30 hops max
-  1  10.144.0.1  4.86ms  2.47ms  1.24ms
-  2  10.144.191.19 (7bd7bf13...)  31.28ms  11.64ms  32.99ms
-  3  10.144.45.23 (a1b2c3d4...)  8.47ms  18.25ms  12.07ms
+maltrace to 10.45.23.100, 30 hops max
+  1  10.0.0.1  4.86ms  2.47ms  1.24ms
+  2  10.191.19.42 (7bd7bf13...)  31.28ms  11.64ms  32.99ms
+  3  10.45.23.100 (a1b2c3d4...)  8.47ms  18.25ms  12.07ms
 ```
 
 ### mallookup - Address Resolution
@@ -266,13 +266,13 @@ maltrace to 10.144.45.23, 30 hops max
 python3 -m malachi.tun_interface lookup a1b2c3d4e5f67890abcdef1234567890
 
 # Look up virtual IP → node ID (if known)
-python3 -m malachi.tun_interface lookup 10.144.195.212
+python3 -m malachi.tun_interface lookup 10.178.195.212
 ```
 
 Output:
 ```
 Address:    a1b2c3d4e5f67890abcdef1234567890
-Virtual IP: 10.144.195.212
+Virtual IP: 10.178.195.212
 Node ID:    a1b2c3d4e5f67890abcdef1234567890
 Short ID:   a1b2c3d4...
 Known:      No
@@ -288,20 +288,20 @@ python3 -m malachi.tun_interface scan
 python3 -m malachi.tun_interface scan -t 30
 
 # Port scan a specific node
-python3 -m malachi.tun_interface scan 10.144.45.23 -p 22,80,443,8080
+python3 -m malachi.tun_interface scan 10.45.23.100 -p 22,80,443,8080
 ```
 
 ### malnc - Netcat
 
 ```bash
 # Connect to a node
-python3 -m malachi.tun_interface nc 10.144.45.23 8080
+python3 -m malachi.tun_interface nc 10.45.23.100 8080
 
 # Listen for connections
 python3 -m malachi.tun_interface nc -l 8080
 
 # UDP mode
-python3 -m malachi.tun_interface nc -u 10.144.45.23 8080
+python3 -m malachi.tun_interface nc -u 10.45.23.100 8080
 ```
 
 ### malstat - Statistics
@@ -326,9 +326,9 @@ MALACHI ROUTING TABLE
 ======================================================================
 Destination          Gateway              Interface    Metric
 ----------------------------------------------------------------------
-10.144.0.1           local                mal0         0
-10.144.0.0/16        *                    mal0         0
-10.144.45.23         direct               mal0         1
+10.0.0.1           local                mal0         0
+10.0.0.0/8        *                    mal0         0
+10.45.23.100         direct               mal0         1
 ```
 
 ### malkeys - Identity Management
@@ -353,7 +353,7 @@ Access Malachi nodes using human-friendly URLs instead of virtual IPs.
 ### How It Works
 
 ```
-http://a1b2c3d4.mli:8080/  →  http://10.144.195.212:8080/
+http://a1b2c3d4.mli:8080/  →  http://10.178.195.212:8080/
      ^^^^^^^^                        ^^^^^^^^^^^^^^
      Node ID prefix                  Virtual IP (auto-resolved)
 ```
@@ -439,7 +439,7 @@ sock = MalachiSocket(daemon)
 sock.connect(("a1b2c3d4e5f67890abcdef1234567890", 8080))
 
 # Or by virtual IP
-sock.connect(("10.144.45.23", 8080))
+sock.connect(("10.45.23.100", 8080))
 
 # Send data
 sock.send(b"Hello Malachi!")
@@ -453,7 +453,7 @@ daemon.stop()
 
 ```python
 with MalachiSocket(daemon) as sock:
-    sock.connect(("10.144.45.23", 8080))
+    sock.connect(("10.45.23.100", 8080))
     sock.send(b"Hello!")
 # Automatically closed
 ```

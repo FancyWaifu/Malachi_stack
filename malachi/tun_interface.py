@@ -15,17 +15,17 @@ Supported Platforms:
 Architecture:
     ┌─────────────────────────────────────────────────────────────┐
     │                      Application                            │
-    │                  send(10.144.x.x, data)                     │
+    │                  send(10.x.x.x, data)                     │
     └───────────────────────┬─────────────────────────────────────┘
                             │
     ┌───────────────────────▼─────────────────────────────────────┐
     │                   mal0 (TUN interface)                      │
-    │                    10.144.0.0/16                            │
+    │                    10.0.0.0/8                            │
     └───────────────────────┬─────────────────────────────────────┘
                             │
     ┌───────────────────────▼─────────────────────────────────────┐
     │                 Malachi TUN Daemon                          │
-    │         Maps 10.144.x.x ←→ Malachi Node IDs                │
+    │         Maps 10.x.x.x ←→ Malachi Node IDs                │
     │         Handles encryption, routing, discovery              │
     └───────────────────────┬─────────────────────────────────────┘
                             │
@@ -89,7 +89,7 @@ if IS_BSD:
     pass
 
 # Malachi virtual network
-MALACHI_NETWORK = "10.144.0.0/16"  # 10.144.x.x reserved for Malachi
+MALACHI_NETWORK = "10.0.0.0/8"  # 10.x.x.x reserved for Malachi (~16.7M addresses)
 MALACHI_PREFIX = ipaddress.IPv4Network(MALACHI_NETWORK)
 
 
@@ -162,17 +162,18 @@ class TunInterfaceBase(ABC):
     def _calculate_local_ip(self) -> str:
         """Calculate our virtual IP from node ID."""
         if self.node_id:
-            # Derive IP from node ID hash (same algorithm as allocate_ip)
+            # Derive IP from node ID hash (uses 3 bytes for 10.x.x.x range)
             node_hash = int.from_bytes(self.node_id[:4], 'big')
+            second_octet = (node_hash >> 16) & 0xFF
             third_octet = (node_hash >> 8) & 0xFF
             fourth_octet = node_hash & 0xFF
-            # Avoid .0 and .1
-            if fourth_octet < 2:
+            # Avoid .0.0.0 and .0.0.1
+            if second_octet == 0 and third_octet == 0 and fourth_octet < 2:
                 fourth_octet = 2
-            return f"10.144.{third_octet}.{fourth_octet}"
+            return f"10.{second_octet}.{third_octet}.{fourth_octet}"
         else:
             # Fallback if no node ID yet
-            return "10.144.0.1"
+            return "10.0.0.1"
 
     @abstractmethod
     def create(self) -> bool:
@@ -256,23 +257,25 @@ class TunInterfaceBase(ABC):
             # Use hash of node ID for consistent allocation
             node_hash = int.from_bytes(node_id[:4], 'big')
 
-            # Map to 10.144.x.x range
+            # Map to 10.x.x.x range (uses 3 bytes = ~16.7M addresses)
+            second_octet = (node_hash >> 16) & 0xFF
             third_octet = (node_hash >> 8) & 0xFF
             fourth_octet = node_hash & 0xFF
 
-            # Avoid .0 and .1 (network and our IP)
-            if fourth_octet < 2:
+            # Avoid .0.0.0 and .0.0.1 (network and gateway)
+            if second_octet == 0 and third_octet == 0 and fourth_octet < 2:
                 fourth_octet = 2
 
-            ip = f"10.144.{third_octet}.{fourth_octet}"
+            ip = f"10.{second_octet}.{third_octet}.{fourth_octet}"
 
             # Handle collisions
             while ip in self._mappings:
                 fourth_octet = (fourth_octet + 1) % 256
-                if fourth_octet < 2:
-                    fourth_octet = 2
+                if fourth_octet == 0:
                     third_octet = (third_octet + 1) % 256
-                ip = f"10.144.{third_octet}.{fourth_octet}"
+                    if third_octet == 0:
+                        second_octet = (second_octet + 1) % 256
+                ip = f"10.{second_octet}.{third_octet}.{fourth_octet}"
 
             # Store mapping
             self._mappings[ip] = NodeMapping(node_id=node_id, virtual_ip=ip)
@@ -417,7 +420,7 @@ class LinuxTunInterface(TunInterfaceBase):
         try:
             # Assign IP address
             subprocess.run([
-                "ip", "addr", "add", f"{self.local_ip}/16",
+                "ip", "addr", "add", f"{self.local_ip}/8",
                 "dev", self.interface_name
             ], check=True, capture_output=True)
 
@@ -431,7 +434,7 @@ class LinuxTunInterface(TunInterfaceBase):
                 "ip", "link", "set", self.interface_name, "mtu", "1400"
             ], check=True, capture_output=True)
 
-            logger.info(f"Configured {self.interface_name} with {self.local_ip}/16")
+            logger.info(f"Configured {self.interface_name} with {self.local_ip}/8")
             self._register_local_mapping()
             return True
 
@@ -549,18 +552,18 @@ class MacOSTunInterface(TunInterfaceBase):
             subprocess.run([
                 "ifconfig", self.interface_name,
                 self.local_ip, self.local_ip,
-                "netmask", "255.255.0.0",
+                "netmask", "255.0.0.0",
                 "mtu", "1400",
                 "up"
             ], check=True, capture_output=True)
 
             # Add route for Malachi network
             subprocess.run([
-                "route", "add", "-net", "10.144.0.0/16",
+                "route", "add", "-net", "10.0.0.0/8",
                 "-interface", self.interface_name
             ], check=True, capture_output=True)
 
-            logger.info(f"Configured {self.interface_name} with {self.local_ip}/16")
+            logger.info(f"Configured {self.interface_name} with {self.local_ip}/8")
             self._register_local_mapping()
             return True
 
@@ -576,7 +579,7 @@ class MacOSTunInterface(TunInterfaceBase):
         # Remove route first
         try:
             subprocess.run([
-                "route", "delete", "-net", "10.144.0.0/16"
+                "route", "delete", "-net", "10.0.0.0/8"
             ], capture_output=True)
         except:
             pass
@@ -669,39 +672,39 @@ class BSDTunInterface(TunInterfaceBase):
                 # OpenBSD uses different ifconfig syntax
                 subprocess.run([
                     "ifconfig", self.interface_name,
-                    "inet", self.local_ip, "255.255.0.0",
+                    "inet", self.local_ip, "255.0.0.0",
                     "mtu", "1400", "up"
                 ], check=True, capture_output=True)
 
                 # Add route
                 subprocess.run([
-                    "route", "add", "-inet", "10.144.0.0/16", self.local_ip
+                    "route", "add", "-inet", "10.0.0.0/8", self.local_ip
                 ], check=True, capture_output=True)
 
             elif bsd_variant == 'netbsd':
                 # NetBSD syntax
                 subprocess.run([
                     "ifconfig", self.interface_name,
-                    "inet", self.local_ip, "netmask", "255.255.0.0", "up"
+                    "inet", self.local_ip, "netmask", "255.0.0.0", "up"
                 ], check=True, capture_output=True)
 
                 subprocess.run([
-                    "route", "add", "-net", "10.144.0.0/16", self.local_ip
+                    "route", "add", "-net", "10.0.0.0/8", self.local_ip
                 ], check=True, capture_output=True)
 
             else:
                 # FreeBSD / DragonFlyBSD syntax
                 subprocess.run([
                     "ifconfig", self.interface_name,
-                    "inet", self.local_ip, "netmask", "255.255.0.0",
+                    "inet", self.local_ip, "netmask", "255.0.0.0",
                     "mtu", "1400", "up"
                 ], check=True, capture_output=True)
 
                 subprocess.run([
-                    "route", "add", "-net", "10.144.0.0/16", self.local_ip
+                    "route", "add", "-net", "10.0.0.0/8", self.local_ip
                 ], check=True, capture_output=True)
 
-            logger.info(f"Configured {self.interface_name} with {self.local_ip}/16")
+            logger.info(f"Configured {self.interface_name} with {self.local_ip}/8")
             self._register_local_mapping()
             return True
 
@@ -717,7 +720,7 @@ class BSDTunInterface(TunInterfaceBase):
         # Remove route
         try:
             subprocess.run([
-                "route", "delete", "-net", "10.144.0.0/16"
+                "route", "delete", "-net", "10.0.0.0/8"
             ], capture_output=True)
         except:
             pass
@@ -1079,9 +1082,12 @@ class MalachiNetworkDaemon:
 
                         # Calculate virtual IP from node ID
                         node_hash = int.from_bytes(peer.node_id[:4], 'big')
+                        second = (node_hash >> 16) & 0xFF
                         third = (node_hash >> 8) & 0xFF
-                        fourth = max(2, node_hash & 0xFF)
-                        virtual_ip = f"10.144.{third}.{fourth}"
+                        fourth = node_hash & 0xFF
+                        if second == 0 and third == 0 and fourth < 2:
+                            fourth = 2
+                        virtual_ip = f"10.{second}.{third}.{fourth}"
 
                         nodes.append({
                             'id': node_hex,
@@ -1257,7 +1263,7 @@ def malctl_status():
 ║  Interface:  {iface:48}║
 ║  Status:     UP                                              ║
 ║  Node ID:    a1b2c3d4e5f67890abcdef1234567890                ║
-║  Virtual IP: 10.144.0.1                                      ║
+║  Virtual IP: 10.0.0.1                                      ║
 ║                                                              ║
 ║  Neighbors:  3                                               ║
 ║  Routes:     5                                               ║
@@ -1267,9 +1273,9 @@ def malctl_status():
 ╠══════════════════════════════════════════════════════════════╣
 ║  Virtual IP      Node ID             Interface    Latency    ║
 ║  ─────────────────────────────────────────────────────────── ║
-║  10.144.45.23    c3d4e5f6...         {iface:12} 2ms        ║
-║  10.144.128.5    a9b8c7d6...         {iface:12} 15ms       ║
-║  10.144.200.100  1a2b3c4d...         {iface:12} 3ms        ║
+║  10.45.23.100    c3d4e5f6...         {iface:12} 2ms        ║
+║  10.128.5.42    a9b8c7d6...         {iface:12} 15ms       ║
+║  10.200.100.50  1a2b3c4d...         {iface:12} 3ms        ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 """)
@@ -1283,9 +1289,9 @@ MALACHI NEIGHBORS
 
 Node ID                           Virtual IP       Interface
 ────────────────────────────────  ───────────────  ─────────
-c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8  10.144.45.23     eth0
-a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4  10.144.128.5     wlan0
-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d  10.144.200.100   eth0
+c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8  10.45.23.100     eth0
+a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4  10.128.5.42     wlan0
+1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d  10.200.100.50   eth0
 """)
 
 
@@ -1333,17 +1339,17 @@ EXAMPLES:
     {run_cmd}
 
     # Ping by virtual IP
-    python3 -m malachi.tun_interface ping 10.144.45.23
+    python3 -m malachi.tun_interface ping 10.45.23.100
 
     # Ping by node ID (full or short)
     python3 -m malachi.tun_interface ping a1b2c3d4e5f67890abcdef1234567890
     python3 -m malachi.tun_interface ping a1b2c3d4
 
     # Continuous ping
-    python3 -m malachi.tun_interface ping -c 0 10.144.45.23
+    python3 -m malachi.tun_interface ping -c 0 10.45.23.100
 
     # Traceroute
-    python3 -m malachi.tun_interface trace 10.144.200.100
+    python3 -m malachi.tun_interface trace 10.200.100.50
 
     # Look up address
     python3 -m malachi.tun_interface lookup a1b2c3d4e5f67890
@@ -1352,10 +1358,10 @@ EXAMPLES:
     python3 -m malachi.tun_interface scan
 
     # Port scan a node
-    python3 -m malachi.tun_interface scan 10.144.45.23 -p 22,80,443
+    python3 -m malachi.tun_interface scan 10.45.23.100 -p 22,80,443
 
     # Connect to a node (netcat-style)
-    python3 -m malachi.tun_interface nc 10.144.45.23 8080
+    python3 -m malachi.tun_interface nc 10.45.23.100 8080
 
     # Listen for connections
     python3 -m malachi.tun_interface nc -l 8080
@@ -1398,9 +1404,9 @@ Requirements:
   - Root/sudo privileges (or CAP_NET_ADMIN on Linux)
   - Python 3.7+
 
-Virtual Network: 10.144.0.0/16
-  - Your node:  10.144.0.1
-  - Neighbors:  10.144.x.x (based on node ID hash)
+Virtual Network: 10.0.0.0/8
+  - Your node:  10.0.0.1
+  - Neighbors:  10.x.x.x (based on node ID hash)
 """)
 
 
@@ -1414,7 +1420,7 @@ class MalachiSocket:
 
     Allows applications to connect using either:
     - Node ID (32-char hex string): "a1b2c3d4e5f67890abcdef1234567890"
-    - Virtual IP: "10.144.45.23"
+    - Virtual IP: "10.45.23.100"
 
     Usage:
         # Using daemon reference
@@ -1425,7 +1431,7 @@ class MalachiSocket:
         sock.close()
 
         # Or with virtual IP
-        sock.connect(("10.144.45.23", 8080))
+        sock.connect(("10.45.23.100", 8080))
     """
 
     def __init__(self, daemon: MalachiNetworkDaemon):
@@ -1454,13 +1460,13 @@ class MalachiSocket:
         # Check if it's a node ID (32-char hex string = 16 bytes)
         if len(host) == 32 and all(c in '0123456789abcdef' for c in host.lower()):
             self._dest_node_id = bytes.fromhex(host)
-        elif host.startswith("10.144."):
+        elif host.startswith("10."):
             # Virtual IP - look up node ID
             self._dest_node_id = self.daemon.tun.get_node_id(host)
             if not self._dest_node_id:
                 raise ConnectionError(f"Unknown host: {host}")
         else:
-            raise ValueError(f"Invalid Malachi address: {host}. Use node ID or 10.144.x.x")
+            raise ValueError(f"Invalid Malachi address: {host}. Use node ID or 10.x.x.x")
 
         self._dest_port = port
         self._connected = True
@@ -1489,7 +1495,7 @@ class MalachiSocket:
         # Resolve node ID
         if len(host) == 32 and all(c in '0123456789abcdef' for c in host.lower()):
             node_id = bytes.fromhex(host)
-        elif host.startswith("10.144."):
+        elif host.startswith("10."):
             node_id = self.daemon.tun.get_node_id(host)
             if not node_id:
                 raise ConnectionError(f"Unknown host: {host}")

@@ -73,7 +73,7 @@ def parse_node_address(address: str) -> Tuple[Optional[bytes], Optional[str]]:
     Parse a node address (node ID, virtual IP, or .mli domain).
 
     Supported formats:
-        - Virtual IP: 10.144.x.x
+        - Virtual IP: 10.x.x.x
         - Full node ID: a1b2c3d4e5f67890abcdef1234567890 (32 hex chars)
         - Short node ID: a1b2c3d4 (8+ hex chars, padded with zeros)
         - .mli domain: a1b2c3d4.mli or subdomain.a1b2c3d4.mli
@@ -100,8 +100,8 @@ def parse_node_address(address: str) -> Tuple[Optional[bytes], Optional[str]]:
             except:
                 pass
 
-    # Check if it's a virtual IP
-    if address.startswith("10.144."):
+    # Check if it's a virtual IP (10.x.x.x range)
+    if address.startswith("10."):
         try:
             ipaddress.IPv4Address(address)
             return (None, address)
@@ -145,14 +145,15 @@ def node_id_to_virtual_ip(node_id) -> str:
         try:
             node_id = bytes.fromhex(node_id)
         except ValueError:
-            return "10.144.0.2"
+            return "10.0.0.2"
 
     node_hash = int.from_bytes(node_id[:4], 'big')
+    second_octet = (node_hash >> 16) & 0xFF
     third_octet = (node_hash >> 8) & 0xFF
     fourth_octet = node_hash & 0xFF
-    if fourth_octet < 2:
+    if second_octet == 0 and third_octet == 0 and fourth_octet < 2:
         fourth_octet = 2
-    return f"10.144.{third_octet}.{fourth_octet}"
+    return f"10.{second_octet}.{third_octet}.{fourth_octet}"
 
 
 def virtual_ip_to_display(ip: str) -> str:
@@ -450,7 +451,7 @@ class MalachiTrace:
                 hop.virtual_ip = node_id_to_virtual_ip(fake_node)
             else:
                 hop.rtt_ms.append(random.uniform(0.5, 5.0))
-                hop.virtual_ip = "10.144.0.1"  # Local
+                hop.virtual_ip = "10.0.0.1"  # Local
 
         return hop
 
@@ -824,10 +825,10 @@ class MalachiRoute:
         print("-" * 70)
 
         # Local route
-        print(f"{'10.144.0.1':<20} {'local':<20} {'mal0':<12} {'0':<8}")
+        print(f"{'10.0.0.1':<20} {'local':<20} {'mal0':<12} {'0':<8}")
 
         # Network route
-        print(f"{'10.144.0.0/16':<20} {'*':<20} {'mal0':<12} {'0':<8}")
+        print(f"{'10.0.0.0/8':<20} {'*':<20} {'mal0':<12} {'0':<8}")
 
         # Neighbor routes (from daemon)
         if self.daemon:
@@ -862,20 +863,29 @@ class MalachiKeys:
     def generate(self, name: str = "default"):
         """Generate a new node identity."""
         try:
-            from .crypto import generate_node_identity
-            node_id, signing_key, x25519_key = generate_node_identity()
+            from .crypto import load_or_create_ed25519, generate_node_id
+            from .config import KEYDIR
+            import shutil
+
+            # Remove existing keys to force new generation
+            key_files = ['ed25519.key', 'x25519.key', 'x25519.pub']
+            for f in key_files:
+                path = os.path.join(KEYDIR, f)
+                if os.path.exists(path):
+                    os.remove(path)
+
+            # Generate new keys
+            signing_key, verify_key = load_or_create_ed25519()
+            node_id = generate_node_id(bytes(verify_key))
 
             print(f"Generated new identity: {name}")
             print(f"  Node ID: {node_id.hex()}")
             print(f"  Short:   {format_node_id(node_id, short=True)}")
             print(f"  Virtual IP: {node_id_to_virtual_ip(node_id)}")
+            print(f"  Keys saved to: {KEYDIR}")
 
-            # Save keys
-            os.makedirs(self.key_dir, exist_ok=True)
-            # TODO: Save keys securely
-
-        except ImportError:
-            print("Crypto module not available. Using random identity.")
+        except ImportError as e:
+            print(f"Crypto module not available ({e}). Using random identity.")
             node_id = os.urandom(16)
             print(f"  Node ID: {node_id.hex()}")
             print(f"  Virtual IP: {node_id_to_virtual_ip(node_id)}")
