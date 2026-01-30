@@ -53,6 +53,15 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+# Try to import LAN manager
+try:
+    from .lan import LANManager, detect_network_interfaces
+    HAS_LAN_MANAGER = True
+except ImportError:
+    HAS_LAN_MANAGER = False
+    LANManager = None
+    detect_network_interfaces = None
+
 # =============================================================================
 # Platform Detection
 # =============================================================================
@@ -848,6 +857,9 @@ class MalachiNetworkDaemon:
         # Mesh networking node (initialized on start)
         self.mesh_node = None
 
+        # LAN manager for discovery and health monitoring
+        self.lan_manager = None
+
     def start(self):
         """Start the daemon."""
         logger.info(f"Starting Malachi Network Daemon on {PLATFORM}...")
@@ -894,16 +906,47 @@ class MalachiNetworkDaemon:
             logger.warning(f"Failed to initialize mesh node: {e}")
             self.mesh_node = None
 
+        # Initialize LAN manager for discovery and health monitoring
+        if HAS_LAN_MANAGER and self.mesh_node:
+            try:
+                self.lan_manager = LANManager(
+                    node_id=self.node_id,
+                    send_discover_func=self._send_ndp_discover,
+                    send_ping_func=self._send_health_ping,
+                    interfaces=[self.physical_interface] if self.physical_interface else None
+                )
+
+                # Set up callbacks
+                self.lan_manager.on_peer_added(self._on_lan_peer_added)
+                self.lan_manager.on_peer_removed(self._on_lan_peer_removed)
+
+                self.lan_manager.start()
+                logger.info("LAN manager started (discovery + health monitoring)")
+            except Exception as e:
+                logger.warning(f"Failed to start LAN manager: {e}")
+                self.lan_manager = None
+
         logger.info(f"Malachi daemon started on {self.tun.interface_name}")
         logger.info(f"  Platform:   {PLATFORM}")
         logger.info(f"  Node ID:    {self.node_id.hex()}")
         logger.info(f"  Virtual IP: {self.tun.local_ip}")
         if self.mesh_node:
             logger.info(f"  Mesh Port:  7891")
+        if self.lan_manager:
+            logger.info(f"  LAN Manager: Active")
 
     def stop(self):
         """Stop the daemon."""
         self._running = False
+
+        # Stop LAN manager
+        if self.lan_manager:
+            try:
+                self.lan_manager.stop()
+                logger.info("LAN manager stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping LAN manager: {e}")
+            self.lan_manager = None
 
         # Stop mesh node
         if self.mesh_node:
@@ -921,6 +964,51 @@ class MalachiNetworkDaemon:
     def set_send_function(self, func: Callable[[bytes, bytes], None]):
         """Set the function used to send packets via Malachi."""
         self._malachi_send_func = func
+
+    def _send_ndp_discover(self, interface: str) -> bool:
+        """Send NDP discover packet on interface (for LAN manager)."""
+        try:
+            from .discovery import NDPHandler
+            from .crypto import load_or_create_ed25519, load_or_create_x25519, generate_node_id
+
+            # Load keys
+            signing_key, verify_key = load_or_create_ed25519()
+            x25519_priv, x25519_pub = load_or_create_x25519()
+
+            handler = NDPHandler(
+                my_id=self.node_id,
+                ed25519_sk=signing_key,
+                ed25519_pub=bytes(verify_key),
+                x25519_pub=x25519_pub,
+                x25519_priv=x25519_priv,
+            )
+
+            return handler.send_discover(interface)
+        except Exception as e:
+            logger.debug(f"NDP discover failed on {interface}: {e}")
+            return False
+
+    def _send_health_ping(self, node_id: bytes, address: Tuple[str, int], ping_id: int):
+        """Send health ping to a peer (for LAN manager)."""
+        if self.mesh_node:
+            try:
+                # Use mesh node's ping mechanism with embedded ping_id
+                import struct
+                from .mesh import MeshMsgType
+                ping_data = struct.pack(">B16sI", MeshMsgType.PING, self.node_id, ping_id)
+                self.mesh_node._send_packet(address, ping_data)
+            except Exception as e:
+                logger.debug(f"Health ping failed to {node_id.hex()[:8]}: {e}")
+
+    def _on_lan_peer_added(self, node_id: bytes, address: Tuple[str, int]):
+        """Called when LAN manager discovers a new peer."""
+        virtual_ip = self.add_neighbor(node_id)
+        logger.info(f"LAN peer discovered: {node_id.hex()[:8]} -> {virtual_ip}")
+
+    def _on_lan_peer_removed(self, node_id: bytes):
+        """Called when LAN manager removes a dead peer."""
+        self.remove_neighbor(node_id)
+        logger.info(f"LAN peer expired: {node_id.hex()[:8]}")
 
     def add_neighbor(
         self,
@@ -1131,6 +1219,14 @@ class MalachiNetworkDaemon:
         # Ensure neighbor is registered
         self.add_neighbor(src_node_id)
 
+        # Notify LAN manager of peer activity
+        if self.lan_manager:
+            # Get address from mesh node if available
+            if self.mesh_node:
+                peer = self.mesh_node.dht.get_peer(src_node_id)
+                if peer:
+                    self.lan_manager.peer_discovered(src_node_id, peer.address)
+
         # Inject into TUN
         self.tun.inject_packet(src_node_id, payload)
 
@@ -1236,6 +1332,26 @@ class MalachiNetworkDaemon:
                 print(f"  {' ' * 22}{path_str}{latency}")
                 print(f"  {' ' * 22}└─> {route.dest_virtual_ip}")
 
+    def print_lan_status(self):
+        """Print detailed LAN status with health monitoring."""
+        if self.lan_manager:
+            print(self.lan_manager.format_status())
+        else:
+            print("LAN manager not available.")
+            print("Basic status:")
+            self.print_status()
+
+    def get_lan_status(self) -> dict:
+        """Get LAN status as dictionary."""
+        if self.lan_manager:
+            return self.lan_manager.get_status()
+        return {
+            'discovery': {},
+            'interfaces': [],
+            'peers': [],
+            'summary': {'total_peers': 0, 'healthy': 0, 'unhealthy': 0, 'dead': 0}
+        }
+
 
 # =============================================================================
 # CLI Tool: malctl
@@ -1319,6 +1435,7 @@ USAGE:
 DAEMON COMMANDS:
     start       Start the Malachi network daemon
     status      Show network status (demo)
+    lan-status  Show LAN status with health monitoring
     neighbors   List discovered neighbors (demo)
     platform    Show platform support info
 
@@ -1382,6 +1499,39 @@ PYTHON API:
     sock.connect(("a1b2c3d4e5f67890abcdef1234567890", 8080))
     sock.send(b"Hello Malachi!")
 """)
+
+
+def malctl_lan_status():
+    """Show detailed LAN status with health monitoring."""
+    if not HAS_LAN_MANAGER:
+        print("LAN manager module not available.")
+        return
+
+    interfaces = detect_network_interfaces()
+
+    print("=== Malachi LAN Status ===")
+    print()
+
+    # Show detected interfaces
+    print("Detected Network Interfaces:")
+    if interfaces:
+        for iface in interfaces:
+            wireless = " [wireless]" if iface.is_wireless else ""
+            print(f"  {iface.name}: {iface.ip} ({iface.mac}){wireless}")
+    else:
+        print("  No suitable interfaces detected")
+    print()
+
+    print("Note: For full LAN status with peer health, run the daemon")
+    print("      and check status via the daemon's print_lan_status() method.")
+    print()
+
+    # Show some helpful info
+    print("LAN Features Available:")
+    print("  - Adaptive discovery (2s-60s interval based on network activity)")
+    print("  - Health monitoring (RTT, packet loss, connection state)")
+    print("  - Automatic peer expiration (120s timeout)")
+    print("  - Multi-interface support")
 
 
 def malctl_platform():
@@ -1618,6 +1768,8 @@ if __name__ == "__main__":
         malctl_neighbors()
     elif cmd == "platform":
         malctl_platform()
+    elif cmd in ("lan-status", "lan", "health"):
+        malctl_lan_status()
     elif cmd == "start":
         malctl_start()
     elif cmd in ("help", "-h", "--help"):
